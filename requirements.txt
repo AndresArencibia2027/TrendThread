@@ -1,0 +1,12 @@
+# --- Google Cloud & Data Ingestion ---
+google-cloud-bigquery==3.12.0
+# Add this if you plan to use Google Trends API directly later
+# pytrends==4.9.2 
+
+# --- Environment & Configuration ---
+python-dotenv==1.0.0
+pathlib==1.0.1
+
+# --- Data Processing (Optional but recommended for 'Scoring Engine') ---
+pandas==2.1.1
+db-dtypes==1.1.1  # Required for BigQuery to Pandas conversion
