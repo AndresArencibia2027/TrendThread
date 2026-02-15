@@ -1,12 +1,19 @@
-# --- Google Cloud & Data Ingestion ---
+# --- Google Cloud & Generative AI ---
 google-cloud-bigquery==3.12.0
-# Add this if you plan to use Google Trends API directly later
-# pytrends==4.9.2 
+google-genai==0.3.0
+google-cloud-aiplatform==1.35.0
+db-dtypes==1.1.1 
 
-# --- Environment & Configuration ---
-python-dotenv==1.0.0
-pathlib==1.0.1
-
-# --- Data Processing (Optional but recommended for 'Scoring Engine') ---
+# --- Data Processing & Analysis ---
 pandas==2.1.1
-db-dtypes==1.1.1  # Required for BigQuery to Pandas conversion
+numpy<2.0.0
+openpyxl==3.1.2                  # Required for Excel operations
+lxml==4.9.3                      
+
+# --- Networking & Web Scraping ---
+requests==2.31.0
+selenium==4.15.2
+webdriver-manager==4.0.1 
+
+# --- Environment & Utilities ---
+python-dotenv==1.0.0

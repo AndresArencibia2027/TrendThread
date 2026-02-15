@@ -1,7 +1,22 @@
-# Credentials
-credentials/*.json
+# --- Credentials & Secrets ---
 .env
+credentials/*.json
 
-# Python
+# --- Data & Outputs ---
+data/
+output/
+*.xlsx
+*.csv
+*.json
+*.png
+
+# --- Python Environment ---
+venv/
+env/
 __pycache__/
 *.py[cod]
+.pytest_cache/
+
+# --- OS Specific ---
+.DS_Store
+Thumbs.db
