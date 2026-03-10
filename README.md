@@ -1,4 +1,4 @@
-# TrendThread Store Manager
+# TrendThread Store Manager 
 
 TrendThread Store Manager is a private seller tool designed to help manage and optimize a trend-focused Etsy shop. The application integrates with the Etsy API to analyze shop performance, support listing creation and updates, and improve search visibility.
 
