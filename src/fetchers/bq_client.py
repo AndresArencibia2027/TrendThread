@@ -44,5 +44,5 @@ def get_rising_trends(limit=20):
         ]
 
     except Exception as e:
-        print(f"❌ BigQuery Error: {e}")
+        print(f" BigQuery Error: {e}")
         return []

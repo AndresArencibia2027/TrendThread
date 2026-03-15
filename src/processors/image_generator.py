@@ -15,7 +15,7 @@ def generate_five_images(project_id, location, prompts, out_dir="output", model_
         path = os.path.join(out_dir, f"trend_image_{i}.png")
         try:
             print(f" Generating Visual {i}/5...")
-            # Note: Method is singular 'generate_image' in most GenAI SDK builds
+            
             response = client.models.generate_image(
                 model=model_name,
                 prompt=prompt,
@@ -32,7 +32,7 @@ def generate_five_images(project_id, location, prompts, out_dir="output", model_
             if response.generated_images:
                 img_data = response.generated_images[0].image.image_bytes
                 
-                # THE FIX: Check if we actually got bytes
+                # Check if we actually got bytes
                 if img_data is not None:
                     with open(path, "wb") as f:
                         f.write(img_data)

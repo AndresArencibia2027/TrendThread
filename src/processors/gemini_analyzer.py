@@ -24,6 +24,11 @@ def _format_gdelt_data(gdelt_context):
     if not gdelt_context: return "No news coverage data available."
     return "\n".join([f"- {art.get('title')} (Source: {art.get('source', 'N/A')})" for art in gdelt_context[:10]])
 
+def _format_kym_data(kym_context):
+    """Formats the independent KnowYourMeme signal for the analyzer."""
+    if not kym_context: return "No confirmed meme data available."
+    return "\n".join([f"- {item['title']} (Confirmed Motif)" for item in kym_context])
+
 def _load_tweets(excel_path):
     if not excel_path or not os.path.exists(excel_path): return "No social media data available."
     if pd is None: return "Pandas not installed."
@@ -41,7 +46,7 @@ def _prepare_image_part(image_path):
         print(f"       Failed to load image {image_path}: {e}")
         return None
 
-def distill_search_terms(client, bq_context, gdelt_context, excel_path):
+def distill_search_terms(client, bq_context, gdelt_context, excel_path, kym_context = []):
     """
     STAGE 1: Strategic Curation.
     Extracts 2026 viral motifs and enriches search terms with cultural anchors 
@@ -50,6 +55,7 @@ def distill_search_terms(client, bq_context, gdelt_context, excel_path):
     bq_str = _format_bq_data(bq_context)
     news_str = _format_gdelt_data(gdelt_context)
     social_str = _load_tweets(excel_path)
+    kym_str = _format_kym_data(kym_context)
 
     system_instruction = """
     You are a 2026 Trend Signal Extraction Engine.
@@ -77,46 +83,22 @@ def distill_search_terms(client, bq_context, gdelt_context, excel_path):
     - Location + event
     - Platform-native hashtag (if dominant)
 
-    The anchor must be ESSENTIAL to identifying the correct trend.
-
-    GOOD:
-    - Vibe the Cat Panty and Stocking
-    - Backrooms movie A24 horror
-    - Sydney Sweeney Met Gala protest dress
-    - GTA 6 trailer Miami leak
-
-    BAD:
-    - Vibe the Cat
-    - Backrooms movie
-    - Met Gala dress
-    - GTA trailer
-
-    Do NOT randomly append brands unless they are genuinely tied to the trend.
+    The anchor must be ESSENTIAL to identifying the correct trend. Do NOT randomly append brands unless they are genuinely tied to the trend.
 
     -----------------------------------
-    MARKETABILITY FILTER
+    MARKETABILITY FILTER (THE WEARABILITY TEST)
     -----------------------------------
-    1. WEARABILITY TEST
-    Discard anything that is:
-    - Local politics
-    - Minor crime
-    - Routine corporate updates
-    - Mundane announcements
-
-    If someone would not wear it to signal identity or cultural alignment, discard it.
-
-    2. MEME RULE
-    If the trend is narrative-driven and lacks a singular visual icon,
-    explicitly include "Meme Treatment" in CONTEXT.
+    - Ask: "Would a customer wear this to express identity?"
+    - Discard: Minor memes, local politics, radio visits, and 2025 holdovers.
+    - Discard: Generic copyright brands (like BTS) or utility trends (Blood Moons).
+    - Favor: Specific icons, characters, or "Visual DNA" that signals cultural alignment.
 
     -----------------------------------
     SEARCH DISCIPLINE
     -----------------------------------
     - Use language already circulating publicly.
-    - TERM must be 3–8 words.
-    - No quotes, no bolding, no parentheses.
-    - No hashtags unless the hashtag is the primary identifier.
-    - No invented names.
+    - TERM must be 2–8 words.
+    - NAKED TEXT: No quotes, bolding, or fluff words like "theory" or "leak."
 
     -----------------------------------
     THE NO-TRASH PROTOCOL
@@ -127,6 +109,7 @@ def distill_search_terms(client, bq_context, gdelt_context, excel_path):
     - BQ (search acceleration)
     - GDELT (media amplification)
     - X/social discourse (repeat participation)
+    - Know Your Meme (KYM)
 
     2. DISCARD LOW-SIGNAL DATA
     Ignore:
@@ -136,6 +119,8 @@ def distill_search_terms(client, bq_context, gdelt_context, excel_path):
     - Corporate earnings calls
     - Generic AI commentary
     - 2025 holdovers without measurable 2026 spike
+    - Irrelevant subjects that would not make good products. People will not buy products relating to short--lived trends (e.g. eclipses, blood moons, google snake, etc.)
+    - Should not refer to copyrighted brands (like bands such as BTS)
 
     3. HIGH-SIGNAL FILTER
     A valid trend must show:
@@ -146,11 +131,35 @@ def distill_search_terms(client, bq_context, gdelt_context, excel_path):
     4. NO FABRICATION RULE
     You MAY NOT invent trends outside the provided datasets. You may utilize well known current memes and motifs.
 
+    -----------------------------------
+    SOURCE HIERARCHY (THE WEIGHTING RULE)
+    -----------------------------------
+    1. PRIMARY SIGNAL: BigQuery (BQ). BQ spikes indicate massive search intent. 
+       Prioritize terms found here as they represent high-volume consumer demand.
+    
+    2. SECONDARY SIGNAL: GDELT & SOCIAL. Use these to verify if the BQ spike 
+       has cross-platform momentum.
+    
+    3. THE "KYM" FILTER: Know Your Meme (KYM) is a double-edged sword. 
+       - Use KYM to find the 'Visual DNA' (Franchise/Artist/Icon) for BQ trends.
+       - If a KYM entry has NO corresponding search spike in BQ, it is likely UNMARKETABLE.
+       - Discard memes that are funny but visually "trashy" or low-effort scraps.
+
     OUTPUT FORMAT:
     TERM: [Anchor-Enriched Search Term] | SUBJECT: [Specific icon/character] | CONTEXT: [Narrative/Story]
     """
     
-    prompt = f"DATA SOURCES:\nBQ: {bq_str}\nNEWS: {news_str}\nSOCIAL: {social_str}"
+    prompt = f"""
+    PRIORITY 1 - BQ (SEARCH INTENT):
+    {bq_str}
+
+    PRIORITY 2 - MEDIA & SOCIAL (MOMENTUM):
+    NEWS: {news_str}
+    SOCIAL: {social_str}
+
+    PRIORITY 3 - KYM (VISUAL CONTEXT & SUPPLEMENTAL):
+    {kym_str}
+    """
     
     response = client.models.generate_content(
         model="gemini-2.0-flash",
@@ -181,32 +190,34 @@ def analyze_visual_strategy(client, trend_visuals_map, trend_data):
     Decides the path to 'Commercial Readiness' based on Subject visibility.
     """
     system_instruction = """
-    You are a Senior Creative Director specializing in 2026 viral motifs and identity-driven commerce.
-    Your goal is to transform "raw signal" into "trustworthy product."
+    You are a Senior Creative Director specializing in 2026 identity-driven commerce.
+    Your objective: Select the most MARKETABLE visual direction. 
 
-    OBJECTIVE:
-    Identify the singular SUBJECT of the trend. Customers buy to express identity through icons, not generic scenes.
+    CRITICAL MARKETABILITY FILTER:
+    A trend is only 'Marketable' if a customer would pay to wear it as a signal of identity.
+    - If a meme is funny but visually 'trashy' (low-res, cluttered, ugly), it is UNMARKETABLE as a raw image.
+    - If a trend is narrative-driven but lacks a clean icon, you MUST choose REGEN to create a professional graphic that represents that narrative.
+    - Do NOT output 'MEME' or 'CLEAN' for something that looks like a low-effort internet scrap.
 
     STRICT DECISION LOGIC:
 
-    1. [REGEN] - MANDATORY IF:
-       - The subject (e.g., Vibe the cat) is sleeping, obscured, or poorly framed.
-       - The images look like low-quality screengrabs, grainy cell photos, or cluttered news footage.
-       - No single image stands out as a "professional graphic."
-       - PROMPT REQUIREMENT: Write a prompt for a "Flat Vector Illustration" or "Isolated Die-cut Sticker" on a SOLID WHITE BACKGROUND.
+    1) REGEN — THE DEFAULT FOR QUALITY:
+    - Use this for most of the trends to ensure a 'High-End' shop aesthetic.
+    - MANDATORY IF: The raw image is unmarketable, cluttered, or looks 'cheap.'
+    - REGEN PROMPT: Must create a 'Flat vector illustration' or 'Die-cut sticker' that distills the Subject's DNA into a professional motif.
+    - STYLE: Focus on 'Sticker Art,' 'Minimalist Vector,' or 'Iconic Emblem.'
 
-    2. [MEME] - MANDATORY IF:
-       - The trend is based on a "Funny News Story" or narrative discourse rather than a singular character icon.
-       - Adding a specific narrative punchline (Social Proof) increases the emotional appeal.
-       - TEXT RULE: Max 6 words. Must provide the "Context" the customer needs to trust the trend.
+    2) MEME — USE ONLY IF:
+    - The narrative is the EXCLUSIVE value of the product and the original image is iconic enough to be wearable.
+    - If the raw image is not marketable, switch to REGEN and describe a graphic that 'represents' the meme.
 
-    3. [CLEAN] - USE ONLY IF:
-       - An image is ALREADY a high-resolution, professional-grade icon on a simple, removable background.
-       - Subject is 100% visible and centered.
+    3) CLEAN — USE ONLY IF:
+    - The image is ALREADY professional-grade (e.g., a high-res 2026 character render or official-looking logo).
+    - If it's a 'funny photo' from X or Reddit, it is likely NOT CLEAN enough for POD.
+    - Do NOT include images that just display generic text. They need recognizable imagery.
 
-    MARKETABILITY CRITERIA:
-    - DISCARD GENERIC NOISE: If a trend lacks an emotional hook or recognizable visual DNA (e.g., local politics, mundane news), ignore it. 
-    - IDENTITY EXPRESSION: Ask: "Would a customer wear this to start a conversation?" If not, REGEN it into a visual motif that is iconic.
+    VISUAL DNA PRESERVATION:
+    Every REGEN prompt must include the SUBJECT and the CULTURAL ANCHOR (e.g., 'Umbrella Corp logo from Resident Evil') to ensure the product remains recognizable to fans.
 
     OUTPUT FORMAT (STRICTLY ONE LINE PER TREND):
     TREND: [term] | DECISION: [CLEAN/MEME/REGEN] | ACTION: [If MEME: text. If REGEN: detailed prompt. If CLEAN: None] | SOURCE: [path_of_BEST_visible_image]

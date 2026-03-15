@@ -19,7 +19,7 @@ def fetch_and_save_visuals(trend_term, num_results=3, base_dir="output/reference
         print(" SERPAPI_KEY not found in .env")
         return []
 
-    # 1. Hit the SerpApi Google Images endpoint
+    # SerpApi Google Images endpoint
     params = {
         "engine": "google_images",
         "q": trend_term,
@@ -28,7 +28,7 @@ def fetch_and_save_visuals(trend_term, num_results=3, base_dir="output/reference
         "safe": "off"
     }
 
-    print(f"🔍 Querying SerpApi (Google Images) for '{trend_term}'...")
+    print(f" Querying SerpApi (Google Images) for '{trend_term}'...")
 
     try:
         response = requests.get("https://serpapi.com/search", params=params, timeout=15)
@@ -38,7 +38,7 @@ def fetch_and_save_visuals(trend_term, num_results=3, base_dir="output/reference
         local_files = []
         headers = {'User-Agent': 'Mozilla/5.0'} # Standard headers for image hosts
 
-        # 2. Iterate through results and verify
+        # Iterate through results and verify
         for item in results:
             if len(local_files) >= num_results:
                 break
