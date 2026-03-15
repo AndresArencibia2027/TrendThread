@@ -1,4 +1,4 @@
-# TrendThread Store Manager
+# TrendThread Store Manager 
 
 TrendThread Store Manager is a private seller tool designed to autonomously identify, curate, and manufacture high-marketability assets for a trend-focused Etsy shop. By synthesizing search intent from BigQuery with cultural context from KnowYourMeme, the application generates professional-grade visual motifs ready for print-on-demand products.
 
