@@ -62,3 +62,36 @@ To run the full trend-to-asset pipeline:
 
 To update the KnowYourMeme reference database independently:
 `python -m src.processors.download_confirmed_memes`
+
+---
+
+## Swipe Review + Printify Publish
+
+This repository now includes a mobile-friendly review app that lets you approve or reject generated designs.
+
+### What it does
+
+- Loads images from `output/final_assets/`
+- Lets you "Dislike" (reject) or "Like + Publish"
+- On approval, uploads the design to Printify and creates + publishes a t-shirt product
+- Because Printify is already connected to Etsy, the published product flows to Etsy
+
+### Run it
+
+1. Install dependencies:
+   `pip install -r requirements.txt`
+2. Ensure `.env` has valid Printify values:
+   - `PRINTIFY_API_TOKEN`
+   - `PRINTIFY_SHOP_ID` (optional: auto-selects first shop if empty)
+   - `PRINTIFY_BLUEPRINT_ID`
+   - `PRINTIFY_PRINT_PROVIDER_ID`
+   - `PRINTIFY_VARIANT_IDS`
+3. Start app:
+   `python -m src.apps.review_app`
+4. Open:
+   `http://localhost:8080`
+
+### Controls
+
+- `ArrowLeft` -> reject
+- `ArrowRight` -> approve and publish

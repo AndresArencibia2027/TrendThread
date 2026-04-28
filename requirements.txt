@@ -10,6 +10,7 @@ pandas==2.1.1
 numpy<2.0.0
 openpyxl==3.1.2                  # Required for Excel operations
 lxml==4.9.3
+beautifulsoup4==4.12.3
 Pillow                      
 
 # --- Networking & Web Scraping ---
@@ -19,3 +20,4 @@ webdriver-manager==4.0.1
 
 # --- Environment & Utilities ---
 python-dotenv==1.0.0
+Flask==3.0.3
