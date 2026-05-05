@@ -61,7 +61,7 @@ def distill_search_terms(client, bq_context, gdelt_context, excel_path, kym_cont
     You are a 2026 Trend Signal Extraction Engine.
 
     Your objective:
-    Output 3 REAL, SEARCH-VALIDATABLE viral trend motifs from 2026.
+    Output 5 REAL, SEARCH-VALIDATABLE viral trend motifs from 2026.
 
     CORE PRINCIPLE: RETRIEVAL PRECISION
 
@@ -182,7 +182,7 @@ def distill_search_terms(client, bq_context, gdelt_context, excel_path, kym_cont
             "context": r[2].strip()
         })
         
-    return clean_trends[:3]
+    return clean_trends[:5]
 
 def analyze_visual_strategy(client, trend_visuals_map, trend_data):
     """
@@ -241,3 +241,81 @@ def analyze_visual_strategy(client, trend_visuals_map, trend_data):
         contents=content_parts
     )
     return response.text
+
+def distill_theme_terms(client, theme: str):
+    """
+    STAGE 1 (THEME MODE): Generates 5 motifs locked strictly to a single theme.
+    Bypasses trend data entirely — used when the user has specified a theme.
+    """
+    system_instruction = f"""
+    You are a creative director specializing in identity-driven print-on-demand design.
+
+    The user has selected a STRICT THEME: "{theme}"
+
+    Your ONLY job is to generate exactly 5 specific, visually rich motifs that belong
+    exclusively to this theme. Do NOT pull in unrelated trends, current events, or 
+    anything outside this theme.
+
+    RULES:
+    - Every single motif MUST be directly and obviously part of "{theme}".
+    - Motifs must have clear Visual DNA: a recognizable character, symbol, or icon 
+      that fans of "{theme}" would immediately identify.
+    - Motifs must be wearable as identity signals (graphic tee / sticker aesthetic).
+    - Be specific — not just "{theme}" but a specific character, arc, moment, or symbol within it.
+    - TERM must be 2–8 words. No quotes, no colons, no special characters.
+
+    OUTPUT FORMAT (exactly 5 lines, no extra text):
+    TERM: [specific motif name] | SUBJECT: [specific character/icon/symbol] | CONTEXT: [one sentence visual description]
+    """
+
+    response = client.models.generate_content(
+        model="gemini-2.0-flash",
+        config=types.GenerateContentConfig(system_instruction=system_instruction),
+        contents=f'Generate 5 motifs for the theme: "{theme}"',
+    )
+
+    raw_results = re.findall(
+        r"TERM:\s*(.*?)\s*\|\s*SUBJECT:\s*(.*?)\s*\|\s*CONTEXT:\s*(.*)", response.text
+    )
+
+    clean_trends = []
+    for r in raw_results:
+        raw_term = r[0].strip()
+        clean_term = re.sub(r'[\\/*?:"<>|*]', "", raw_term)
+        clean_trends.append({
+            "term": clean_term,
+            "subject": r[1].strip(),
+            "context": r[2].strip(),
+        })
+
+    return clean_trends[:5]
+
+
+def generate_single_regen(client, term: str, subject: str, context: str, user_prompt: str = "") -> str:
+    """
+    Generates a detailed REGEN image prompt for a single design.
+    Returns the prompt string to pass directly to generate_images().
+    """
+    extra = f" Additional direction: {user_prompt.strip()}." if user_prompt.strip() else ""
+    system_instruction = """
+    You are a senior art director writing a single Imagen generation prompt.
+    Output ONLY the prompt text — no labels, no explanation, no markdown.
+    The prompt must describe a flat vector illustration or die-cut sticker 
+    suitable for print-on-demand. It must be detailed, specific, and 
+    reference the subject's Visual DNA so a fan would instantly recognize it.
+    End with: flat vector illustration, die-cut sticker style, white background,
+    high contrast, no text.
+    """
+
+    response = client.models.generate_content(
+        model="gemini-2.0-flash",
+        config=types.GenerateContentConfig(system_instruction=system_instruction),
+        contents=(
+            f"Subject: {subject}\n"
+            f"Term: {term}\n"
+            f"Context: {context}\n"
+            f"{extra}\n"
+            "Write the image generation prompt."
+        ),
+    )
+    return response.text.strip()

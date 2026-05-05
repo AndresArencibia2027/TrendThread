@@ -1,7 +1,7 @@
 import os
 import shutil
 from PIL import Image, ImageDraw, ImageFont
-from src.processors.image_generator import generate_five_images
+from src.processors.image_generator import generate_images
 
 def process_final_assets(visual_report, project_id, location):
     """Manufactures product-ready assets without attempting background removal."""
@@ -32,7 +32,7 @@ def process_final_assets(visual_report, project_id, location):
 
             elif "REGEN" in decision:
                 marketable_prompt = f"{action}, flat vector illustration, die-cut sticker style."
-                paths = generate_five_images(project_id, location, [marketable_prompt], out_dir=final_dir)
+                paths = generate_images(project_id, location, [marketable_prompt], out_dir=final_dir)
                 if paths and os.path.exists(paths[0]):
                     # Move the generated image to the final path with the correct slug
                     shutil.move(paths[0], output_path)

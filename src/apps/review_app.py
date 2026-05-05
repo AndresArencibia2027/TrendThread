@@ -15,6 +15,8 @@ from src.processors.download_confirmed_memes import main as run_kym_scraper
 from src.processors.gemini_analyzer import (
     analyze_visual_strategy,
     distill_search_terms,
+    distill_theme_terms,
+    generate_single_regen,
     get_client,
 )
 from src.integrations.printify_client import (
@@ -114,7 +116,11 @@ def get_next_design() -> Optional[Dict]:
             LIMIT 1
             """
         ).fetchone()
-    return dict(row) if row else None
+    if not row:
+        return None
+    d = dict(row)
+    d["name"] = Path(d["path"]).name
+    return d
 
 
 def get_queue_counts() -> Dict[str, int]:
@@ -155,19 +161,20 @@ def generate_top_designs(theme: str = "") -> Dict[str, object]:
     run_kym_scraper(start_page=1, end_page=1)
     kym_context = get_local_kym_context()
 
-    trend_data = distill_search_terms(
-        client=client,
-        bq_context=bq_raw,
-        gdelt_context=gdelt_raw,
-        excel_path=None,
-        kym_context=kym_context,
-    )
+    if theme:
+        # Theme mode: bypass trend pipeline entirely, generate theme-locked motifs
+        trend_data = distill_theme_terms(client=client, theme=theme)
+    else:
+        trend_data = distill_search_terms(
+            client=client,
+            bq_context=bq_raw,
+            gdelt_context=gdelt_raw,
+            excel_path=None,
+            kym_context=kym_context,
+        )
+
     if not trend_data:
         return {"count": 0, "paths": []}
-
-    if theme:
-        for item in trend_data:
-            item["context"] = f"{item.get('context', '')} Theme focus: {theme}".strip()
 
     trend_visuals_map = {}
     for item in trend_data:
@@ -376,6 +383,57 @@ def index():
         .toolbar { grid-template-columns: 1fr; }
         img { min-height: 320px; }
       }
+      .regen-wrap { display: flex; justify-content: center; margin-top: 10px; }
+      .regen-btn {
+        width: calc(50% - 5px);
+        background: linear-gradient(135deg, #d4a000, #b38600);
+        color: #fff;
+        border: 0;
+        border-radius: 999px;
+        padding: 14px;
+        font-size: 15px;
+        font-weight: 800;
+        cursor: pointer;
+      }
+      .regen-modal {
+        display: none;
+        position: fixed;
+        inset: 0;
+        background: rgba(0,0,0,.65);
+        backdrop-filter: blur(4px);
+        z-index: 100;
+        align-items: center;
+        justify-content: center;
+      }
+      .regen-modal.open { display: flex; }
+      .regen-box {
+        background: #131d34;
+        border: 1px solid rgba(156,178,231,.3);
+        border-radius: 18px;
+        padding: 24px 20px 18px;
+        width: min(400px, 90vw);
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+      .regen-box h3 { margin: 0; font-size: 17px; color: #f4f7ff; }
+      .regen-box p  { margin: 0; font-size: 13px; color: #8fa3cc; }
+      .regen-box input {
+        border: 1px solid #2a395f;
+        border-radius: 10px;
+        padding: 10px 12px;
+        background: #0f1828;
+        color: #f4f7ff;
+        font-size: 14px;
+        width: 100%;
+      }
+      .regen-box-actions { display: flex; gap: 8px; }
+      .regen-box-actions button {
+        flex: 1; padding: 11px; border: 0; border-radius: 999px;
+        font-weight: 700; font-size: 14px; cursor: pointer;
+      }
+      .regen-cancel { background: #1e2d4a; color: #a7b6d8; }
+      .regen-confirm { background: linear-gradient(135deg, #c9a800, #f0cb00); color: #1a1200; }
     </style>
   </head>
   <body>
@@ -401,9 +459,23 @@ def index():
             <button class="reject" onclick="decide('reject')">Dislike</button>
             <button class="approve" onclick="decide('approve')">Like + Publish</button>
           </div>
+          <div class="regen-wrap">
+            <button class="regen-btn" onclick="openRegenModal()">Regenerate</button>
+          </div>
         </div>
       </div>
       <div class="status" id="status"></div>
+      <div class="regen-modal" id="regen-modal">
+      <div class="regen-box">
+        <h3>Regenerate Design</h3>
+        <p>Optionally describe what you want. Leave blank to regenerate from the current motif.</p>
+        <input id="regen-prompt" placeholder="e.g. more minimal, darker palette, chibi style…" />
+        <div class="regen-box-actions">
+          <button class="regen-cancel" onclick="closeRegenModal()">Cancel</button>
+          <button class="regen-confirm" onclick="confirmRegen()">Regenerate</button>
+        </div>
+      </div>
+    </div>
     </div>
     <script>
       let current = null;
@@ -427,7 +499,7 @@ def index():
         current = data.design;
         document.getElementById('design-image').style.display = 'block';
         document.getElementById('design-image').src = '/api/image/' + current.id;
-        document.getElementById('design-meta').innerText = `#${current.id} - ${current.path.split('/').pop()}`;
+        document.getElementById('design-meta').innerText = `#${current.id} - ${current.name}`;
         document.getElementById('status').innerText = '';
       }
       async function decide(action) {
@@ -459,6 +531,45 @@ def index():
       }
       function triggerUpload() {
         document.getElementById('file-input').click();
+      }
+      function openRegenModal() {
+        if (!current) {
+          document.getElementById('status').innerText = 'No active design to regenerate.';
+          return;
+        }
+        document.getElementById('regen-prompt').value = '';
+        document.getElementById('regen-modal').classList.add('open');
+      }
+      function closeRegenModal() {
+        document.getElementById('regen-modal').classList.remove('open');
+      }
+      async function confirmRegen() {
+        closeRegenModal();
+        const prompt = document.getElementById('regen-prompt').value.trim();
+        document.getElementById('status').innerText = 'Regenerating image…';
+        // Blank the image while waiting
+        const img = document.getElementById('design-image');
+        img.style.opacity = '0.3';
+        try {
+          const resp = await fetch('/api/regenerate', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ id: current.id, prompt })
+          });
+          const data = await resp.json();
+          if (resp.ok) {
+            // Cache-bust so the browser reloads the replaced file
+            img.src = '/api/image/' + current.id + '?t=' + Date.now();
+            img.style.opacity = '1';
+            document.getElementById('status').innerText = data.message;
+          } else {
+            img.style.opacity = '1';
+            document.getElementById('status').innerText = data.message;
+          }
+        } catch (err) {
+          img.style.opacity = '1';
+          document.getElementById('status').innerText = 'Regeneration request failed.';
+        }
       }
       async function uploadDesign() {
         const input = document.getElementById('file-input');
@@ -573,6 +684,63 @@ def api_generate():
     except Exception as exc:
         return jsonify({"message": f"Generation failed: {exc}"}), 500
 
+@app.post("/api/regenerate")
+def api_regenerate():
+    payload = request.get_json(silent=True) or {}
+    design_id = payload.get("id")
+    user_prompt = (payload.get("prompt") or "").strip()
+
+    if not design_id:
+        return jsonify({"message": "Missing design id"}), 400
+
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT id, path FROM designs WHERE id = ?", (design_id,)
+        ).fetchone()
+    if not row:
+        return jsonify({"message": "Design not found"}), 404
+
+    project_id = os.getenv("VERTEX_PROJECT_ID", "").strip()
+    location = os.getenv("VERTEX_LOCATION", "us-central1").strip()
+    if not project_id:
+        return jsonify({"message": "VERTEX_PROJECT_ID not set"}), 500
+
+    try:
+        from src.processors.image_generator import generate_images
+
+        client = get_client()
+        image_path = row["path"]
+
+        # Derive term/subject/context from the filename as a best-effort fallback
+        stem = Path(image_path).stem.replace("_final", "").replace("_", " ").strip()
+        term = stem
+        subject = stem
+        context = f"A wearable graphic design representing: {stem}"
+
+        regen_prompt = generate_single_regen(
+            client=client,
+            term=term,
+            subject=subject,
+            context=context,
+            user_prompt=user_prompt,
+        )
+
+        full_prompt = f"{regen_prompt}, flat vector illustration, die-cut sticker style."
+        new_paths = generate_images(
+            project_id, location, [full_prompt], out_dir=str(ASSETS_DIR)
+        )
+
+        if not new_paths or not os.path.exists(new_paths[0]):
+            return jsonify({"message": "Image generation produced no output"}), 500
+
+        # Replace the existing file in-place so the same DB record stays valid
+        import shutil
+        shutil.move(new_paths[0], image_path)
+
+        return jsonify({"message": "Regenerated successfully."})
+
+    except Exception as exc:
+        return jsonify({"message": f"Regeneration failed: {exc}"}), 500
 
 def bootstrap() -> None:
     init_db()

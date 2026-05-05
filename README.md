@@ -72,7 +72,7 @@ This repository now includes a mobile-friendly review app that lets you approve 
 ### What it does
 
 - Loads images from `output/final_assets/`
-- Lets you "Dislike" (reject) or "Like + Publish"
+- Lets you "Dislike" (reject), "Like + Publish", or "Regenerate" images.
 - On approval, uploads the design to Printify and creates + publishes a t-shirt product
 - Because Printify is already connected to Etsy, the published product flows to Etsy
 

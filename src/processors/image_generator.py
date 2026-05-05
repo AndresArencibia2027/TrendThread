@@ -14,7 +14,7 @@ def _build_image_client(project_id, location):
     )
 
 
-def generate_five_images(project_id, location, prompts, out_dir="output", model_name="imagen-4.0-generate-001"):
+def generate_images(project_id, location, prompts, out_dir="output", model_name="imagen-4.0-generate-001"):
     """Generates 5 PNG images. Uses 'generate_image' (singular) for 2026 SDK stability."""
     os.makedirs(out_dir, exist_ok=True)
     using_vertex = bool(project_id)
@@ -26,7 +26,7 @@ def generate_five_images(project_id, location, prompts, out_dir="output", model_
     for i, prompt in enumerate(prompts[:5], 1):
         path = os.path.join(out_dir, f"trend_image_{i}.png")
         try:
-            print(f" Generating Visual {i}/5...")
+            print(f" Generating Visual...")
 
             response = None
             last_error = None
