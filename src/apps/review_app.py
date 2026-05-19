@@ -43,6 +43,10 @@ DEFAULT_VARIANT_IDS = [
 ]
 
 
+# ---------------------------------------------------------------------------
+# Database helpers
+# ---------------------------------------------------------------------------
+
 def get_db() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
@@ -55,16 +59,27 @@ def init_db() -> None:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS designs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                path TEXT NOT NULL UNIQUE,
-                status TEXT NOT NULL DEFAULT 'pending',
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                path                TEXT NOT NULL UNIQUE,
+                status              TEXT NOT NULL DEFAULT 'pending',
                 printify_product_id TEXT,
-                error_message TEXT,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                error_message       TEXT,
+                risk_level          TEXT NOT NULL DEFAULT 'LOW',
+                risk_reason         TEXT,
+                created_at          DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at          DATETIME DEFAULT CURRENT_TIMESTAMP
             )
             """
         )
+        # Migrate existing DBs that pre-date the risk_level column
+        try:
+            conn.execute("ALTER TABLE designs ADD COLUMN risk_level TEXT NOT NULL DEFAULT 'LOW'")
+        except Exception:
+            pass  # Column already exists
+        try:
+            conn.execute("ALTER TABLE designs ADD COLUMN risk_reason TEXT")
+        except Exception:
+            pass
         conn.commit()
 
 
@@ -82,9 +97,15 @@ def seed_assets() -> None:
         conn.commit()
 
 
-def add_design_file(file_path: Path) -> None:
+def add_design_file(
+    file_path: Path,
+    risk_level: str = "LOW",
+    risk_reason: Optional[str] = None,
+) -> None:
     with get_db() as conn:
-        existing = conn.execute("SELECT id FROM designs WHERE path = ?", (str(file_path),)).fetchone()
+        existing = conn.execute(
+            "SELECT id FROM designs WHERE path = ?", (str(file_path),)
+        ).fetchone()
         if existing:
             conn.execute(
                 """
@@ -92,15 +113,20 @@ def add_design_file(file_path: Path) -> None:
                 SET status = 'pending',
                     printify_product_id = NULL,
                     error_message = NULL,
+                    risk_level = ?,
+                    risk_reason = ?,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE path = ?
                 """,
-                (str(file_path),),
+                (risk_level, risk_reason, str(file_path)),
             )
         else:
             conn.execute(
-                "INSERT INTO designs (path, status) VALUES (?, 'pending')",
-                (str(file_path),),
+                """
+                INSERT INTO designs (path, status, risk_level, risk_reason)
+                VALUES (?, 'pending', ?, ?)
+                """,
+                (str(file_path), risk_level, risk_reason),
             )
         conn.commit()
 
@@ -109,7 +135,8 @@ def get_next_design() -> Optional[Dict]:
     with get_db() as conn:
         row = conn.execute(
             """
-            SELECT id, path, status, printify_product_id, error_message
+            SELECT id, path, status, printify_product_id, error_message,
+                   risk_level, risk_reason
             FROM designs
             WHERE status = 'pending'
             ORDER BY id ASC
@@ -128,7 +155,7 @@ def get_queue_counts() -> Dict[str, int]:
         rows = conn.execute(
             "SELECT status, COUNT(*) as count FROM designs GROUP BY status"
         ).fetchall()
-    counts = {"pending": 0, "published": 0, "rejected": 0, "failed": 0}
+    counts = {"pending": 0, "published": 0, "rejected": 0, "failed": 0, "flagged": 0}
     for row in rows:
         if row["status"] in counts:
             counts[row["status"]] = row["count"]
@@ -144,6 +171,10 @@ def get_local_kym_context():
                 kym_entries.append({"title": clean_title, "path": str(file)})
     return kym_entries
 
+
+# ---------------------------------------------------------------------------
+# Design generation
+# ---------------------------------------------------------------------------
 
 def generate_top_designs(theme: str = "") -> Dict[str, object]:
     project_id = os.getenv("VERTEX_PROJECT_ID", "").strip()
@@ -162,7 +193,7 @@ def generate_top_designs(theme: str = "") -> Dict[str, object]:
     kym_context = get_local_kym_context()
 
     if theme:
-        # Theme mode: bypass trend pipeline entirely, generate theme-locked motifs
+        # Theme mode: bypass trend pipeline, generate theme-locked motifs
         trend_data = distill_theme_terms(client=client, theme=theme)
     else:
         trend_data = distill_search_terms(
@@ -184,17 +215,35 @@ def generate_top_designs(theme: str = "") -> Dict[str, object]:
             trend_visuals_map[term] = local_images
 
     visual_report = analyze_visual_strategy(client, trend_visuals_map, trend_data)
-    process_final_assets(visual_report=visual_report, project_id=project_id, location=location)
 
-    fresh_assets = sorted(
-        [*ASSETS_DIR.glob("*.png"), *ASSETS_DIR.glob("*.jpg"), *ASSETS_DIR.glob("*.jpeg")],
-        key=lambda p: p.stat().st_mtime,
+    # process_final_assets now returns result dicts with risk metadata
+    asset_results = process_final_assets(
+        visual_report=visual_report,
+        project_id=project_id,
+        location=location,
+        gemini_client=client,
+    )
+
+    # Sort by most recently modified and take the freshest 5
+    fresh_results = sorted(
+        asset_results,
+        key=lambda r: Path(r["path"]).stat().st_mtime if Path(r["path"]).exists() else 0,
         reverse=True,
     )[:5]
-    for file_path in reversed(fresh_assets):
-        add_design_file(file_path)
 
-    return {"count": len(fresh_assets), "paths": [str(path) for path in fresh_assets]}
+    for result in reversed(fresh_results):
+        file_path = Path(result["path"])
+        if file_path.exists():
+            add_design_file(
+                file_path,
+                risk_level=result.get("risk_level", "LOW"),
+                risk_reason=result.get("risk_reason"),
+            )
+
+    return {
+        "count": len(fresh_results),
+        "paths": [r["path"] for r in fresh_results],
+    }
 
 
 def update_design_status(
@@ -207,7 +256,8 @@ def update_design_status(
         conn.execute(
             """
             UPDATE designs
-            SET status = ?, printify_product_id = ?, error_message = ?, updated_at = CURRENT_TIMESTAMP
+            SET status = ?, printify_product_id = ?, error_message = ?,
+                updated_at = CURRENT_TIMESTAMP
             WHERE id = ?
             """,
             (status, printify_product_id, error_message, design_id),
@@ -247,7 +297,9 @@ def publish_to_printify(image_path: str) -> str:
             products_result = client.get_products(shop_id=shop_id, page=1, limit=1)
             products = products_result.get("data", [])
             if products:
-                template_product = client.get_product(shop_id=shop_id, product_id=str(products[0]["id"]))
+                template_product = client.get_product(
+                    shop_id=shop_id, product_id=str(products[0]["id"])
+                )
     except Exception:
         template_product = None
 
@@ -274,6 +326,10 @@ def publish_to_printify(image_path: str) -> str:
     client.publish_product(shop_id=shop_id, product_id=product_id)
     return product_id
 
+
+# ---------------------------------------------------------------------------
+# Flask app
+# ---------------------------------------------------------------------------
 
 app = Flask(__name__)
 
@@ -351,6 +407,28 @@ def index():
         border-radius: 16px;
         background: #0f1422;
       }
+      /* Risk banners */
+      .risk-banner {
+        display: none;
+        margin-top: 8px;
+        border-radius: 10px;
+        padding: 8px 12px;
+        font-size: 13px;
+        font-weight: 600;
+        line-height: 1.4;
+      }
+      .risk-banner.medium {
+        display: block;
+        background: rgba(200, 140, 0, 0.18);
+        border: 1px solid rgba(200, 140, 0, 0.5);
+        color: #f5cc60;
+      }
+      .risk-banner.high {
+        display: block;
+        background: rgba(200, 40, 40, 0.18);
+        border: 1px solid rgba(200, 40, 40, 0.5);
+        color: #f56060;
+      }
       .meta {
         margin-top: 10px;
         display: flex;
@@ -369,24 +447,13 @@ def index():
         font-weight: 800;
         cursor: pointer;
       }
-      .reject { background: linear-gradient(135deg, #d74444, #9d1f1f); }
+      .reject  { background: linear-gradient(135deg, #d74444, #9d1f1f); }
       .approve { background: linear-gradient(135deg, #21b867, #168d4c); }
-      .status {
-        margin: 12px auto 0;
-        max-width: 560px;
-        min-height: 22px;
-        color: #cbd6f6;
-        font-size: 14px;
-      }
-      @media (max-width: 560px) {
-        .title { font-size: 27px; }
-        .toolbar { grid-template-columns: 1fr; }
-        img { min-height: 320px; }
-      }
-      .regen-wrap { display: flex; justify-content: center; margin-top: 10px; }
+      .regen-wrap { display: flex; margin-top: 10px; }
       .regen-btn {
         width: calc(50% - 5px);
-        background: linear-gradient(135deg, #d4a000, #b38600);
+        margin: 0 auto;
+        background: linear-gradient(135deg, #b38600, #d4a000);
         color: #fff;
         border: 0;
         border-radius: 999px;
@@ -395,6 +462,7 @@ def index():
         font-weight: 800;
         cursor: pointer;
       }
+      /* Regen modal */
       .regen-modal {
         display: none;
         position: fixed;
@@ -432,8 +500,20 @@ def index():
         flex: 1; padding: 11px; border: 0; border-radius: 999px;
         font-weight: 700; font-size: 14px; cursor: pointer;
       }
-      .regen-cancel { background: #1e2d4a; color: #a7b6d8; }
-      .regen-confirm { background: linear-gradient(135deg, #c9a800, #f0cb00); color: #1a1200; }
+      .regen-cancel  { background: #1e2d4a; color: #a7b6d8; }
+      .regen-confirm { background: linear-gradient(135deg, #b38600, #d4a000); color: #fff; }
+      .status {
+        margin: 12px auto 0;
+        max-width: 560px;
+        min-height: 22px;
+        color: #cbd6f6;
+        font-size: 14px;
+      }
+      @media (max-width: 560px) {
+        .title { font-size: 27px; }
+        .toolbar { grid-template-columns: 1fr; }
+        img { min-height: 320px; }
+      }
     </style>
   </head>
   <body>
@@ -451,49 +531,68 @@ def index():
         <div class="card-shadow"></div>
         <div class="card" id="swipe-card">
           <img id="design-image" src="" alt="design" />
+          <div class="risk-banner" id="risk-banner"></div>
           <div class="meta">
             <span id="design-meta">Loading...</span>
             <span>← Reject / Publish →</span>
           </div>
           <div class="actions">
-            <button class="reject" onclick="decide('reject')">Dislike</button>
+            <button class="reject"  onclick="decide('reject')">Dislike</button>
             <button class="approve" onclick="decide('approve')">Like + Publish</button>
           </div>
           <div class="regen-wrap">
-            <button class="regen-btn" onclick="openRegenModal()">Regenerate</button>
+            <button class="regen-btn" onclick="openRegenModal()">⟳ Regenerate</button>
           </div>
         </div>
       </div>
       <div class="status" id="status"></div>
-      <div class="regen-modal" id="regen-modal">
+    </div>
+
+    <!-- Regen modal -->
+    <div class="regen-modal" id="regen-modal">
       <div class="regen-box">
         <h3>Regenerate Design</h3>
         <p>Optionally describe what you want. Leave blank to regenerate from the current motif.</p>
         <input id="regen-prompt" placeholder="e.g. more minimal, darker palette, chibi style…" />
         <div class="regen-box-actions">
-          <button class="regen-cancel" onclick="closeRegenModal()">Cancel</button>
+          <button class="regen-cancel"  onclick="closeRegenModal()">Cancel</button>
           <button class="regen-confirm" onclick="confirmRegen()">Regenerate</button>
         </div>
       </div>
     </div>
-    </div>
+
     <script>
       let current = null;
       let startX = 0;
       let deltaX = 0;
       const card = document.getElementById('swipe-card');
+
+      function showRiskBanner(riskLevel, riskReason) {
+        const banner = document.getElementById('risk-banner');
+        banner.className = 'risk-banner';
+        if (riskLevel === 'HIGH') {
+          banner.classList.add('high');
+          banner.innerText = '⚠ HIGH IP RISK — ' + (riskReason || 'Possible copyright issue. Review before publishing.');
+        } else if (riskLevel === 'MEDIUM') {
+          banner.classList.add('medium');
+          banner.innerText = '⚠ Review flagged — ' + (riskReason || 'Potential IP concern. Use judgement before publishing.');
+        }
+        // LOW: banner stays hidden (no class added)
+      }
+
       async function loadNext() {
         const resp = await fetch('/api/next');
         const data = await resp.json();
         if (data.counts) {
           const c = data.counts;
           document.getElementById('stats').innerText =
-            `Pending: ${c.pending} | Published: ${c.published} | Rejected: ${c.rejected} | Failed: ${c.failed}`;
+            `Pending: ${c.pending} | Published: ${c.published} | Rejected: ${c.rejected} | Failed: ${c.failed} | Flagged: ${c.flagged}`;
         }
         if (!data.design) {
           current = null;
           document.getElementById('design-image').style.display = 'none';
           document.getElementById('design-meta').innerText = 'No pending designs. Click "Generate Top 5".';
+          document.getElementById('risk-banner').className = 'risk-banner';
           return;
         }
         current = data.design;
@@ -501,7 +600,9 @@ def index():
         document.getElementById('design-image').src = '/api/image/' + current.id;
         document.getElementById('design-meta').innerText = `#${current.id} - ${current.name}`;
         document.getElementById('status').innerText = '';
+        showRiskBanner(current.risk_level || 'LOW', current.risk_reason || '');
       }
+
       async function decide(action) {
         if (!current) {
           document.getElementById('status').innerText = 'No active design. Upload one first.';
@@ -517,6 +618,7 @@ def index():
         document.getElementById('status').innerText = data.message;
         await loadNext();
       }
+
       async function generateDesigns() {
         const theme = document.getElementById('theme-input').value.trim();
         document.getElementById('status').innerText = 'Generating top 5 designs...';
@@ -529,48 +631,11 @@ def index():
         document.getElementById('status').innerText = data.message;
         await loadNext();
       }
+
       function triggerUpload() {
         document.getElementById('file-input').click();
       }
-      function openRegenModal() {
-        if (!current) {
-          document.getElementById('status').innerText = 'No active design to regenerate.';
-          return;
-        }
-        document.getElementById('regen-prompt').value = '';
-        document.getElementById('regen-modal').classList.add('open');
-      }
-      function closeRegenModal() {
-        document.getElementById('regen-modal').classList.remove('open');
-      }
-      async function confirmRegen() {
-        closeRegenModal();
-        const prompt = document.getElementById('regen-prompt').value.trim();
-        document.getElementById('status').innerText = 'Regenerating image…';
-        // Blank the image while waiting
-        const img = document.getElementById('design-image');
-        img.style.opacity = '0.3';
-        try {
-          const resp = await fetch('/api/regenerate', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ id: current.id, prompt })
-          });
-          const data = await resp.json();
-          if (resp.ok) {
-            // Cache-bust so the browser reloads the replaced file
-            img.src = '/api/image/' + current.id + '?t=' + Date.now();
-            img.style.opacity = '1';
-            document.getElementById('status').innerText = data.message;
-          } else {
-            img.style.opacity = '1';
-            document.getElementById('status').innerText = data.message;
-          }
-        } catch (err) {
-          img.style.opacity = '1';
-          document.getElementById('status').innerText = 'Regeneration request failed.';
-        }
-      }
+
       async function uploadDesign() {
         const input = document.getElementById('file-input');
         if (!input.files || !input.files.length) {
@@ -586,13 +651,55 @@ def index():
         input.value = '';
         await loadNext();
       }
+
       document.getElementById('file-input').addEventListener('change', uploadDesign);
-      card.addEventListener('touchstart', (e) => {
-        startX = e.touches[0].clientX;
-      });
-      card.addEventListener('touchmove', (e) => {
-        deltaX = e.touches[0].clientX - startX;
-      });
+
+      // Regen modal
+      function openRegenModal() {
+        if (!current) {
+          document.getElementById('status').innerText = 'No active design to regenerate.';
+          return;
+        }
+        document.getElementById('regen-prompt').value = '';
+        document.getElementById('regen-modal').classList.add('open');
+      }
+      function closeRegenModal() {
+        document.getElementById('regen-modal').classList.remove('open');
+      }
+      async function confirmRegen() {
+        closeRegenModal();
+        const prompt = document.getElementById('regen-prompt').value.trim();
+        document.getElementById('status').innerText = 'Regenerating image…';
+        const img = document.getElementById('design-image');
+        img.style.opacity = '0.3';
+        try {
+          const resp = await fetch('/api/regenerate', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ id: current.id, prompt })
+          });
+          const data = await resp.json();
+          if (resp.ok) {
+            img.src = '/api/image/' + current.id + '?t=' + Date.now();
+            img.style.opacity = '1';
+            document.getElementById('status').innerText = data.message;
+            // Refresh risk banner from updated design data
+            if (data.risk_level) {
+              showRiskBanner(data.risk_level, data.risk_reason || '');
+            }
+          } else {
+            img.style.opacity = '1';
+            document.getElementById('status').innerText = data.message;
+          }
+        } catch (err) {
+          img.style.opacity = '1';
+          document.getElementById('status').innerText = 'Regeneration request failed.';
+        }
+      }
+
+      // Touch swipe
+      card.addEventListener('touchstart', (e) => { startX = e.touches[0].clientX; });
+      card.addEventListener('touchmove',  (e) => { deltaX = e.touches[0].clientX - startX; });
       card.addEventListener('touchend', async () => {
         if (Math.abs(deltaX) > 80) {
           if (deltaX > 0) await decide('approve');
@@ -601,16 +708,23 @@ def index():
         startX = 0;
         deltaX = 0;
       });
+
+      // Keyboard shortcuts
       window.addEventListener('keydown', (e) => {
-        if (e.key === 'ArrowLeft') decide('reject');
+        if (e.key === 'ArrowLeft')  decide('reject');
         if (e.key === 'ArrowRight') decide('approve');
       });
+
       loadNext();
     </script>
   </body>
 </html>
 """
 
+
+# ---------------------------------------------------------------------------
+# API endpoints
+# ---------------------------------------------------------------------------
 
 @app.get("/api/next")
 def api_next():
@@ -684,6 +798,7 @@ def api_generate():
     except Exception as exc:
         return jsonify({"message": f"Generation failed: {exc}"}), 500
 
+
 @app.post("/api/regenerate")
 def api_regenerate():
     payload = request.get_json(silent=True) or {}
@@ -706,41 +821,67 @@ def api_regenerate():
         return jsonify({"message": "VERTEX_PROJECT_ID not set"}), 500
 
     try:
-        from src.processors.image_generator import generate_images
+        from src.processors.image_generator import generate_from_prompt
+        from src.processors.ip_screener import screen_generated_image
+        import shutil
 
-        client = get_client()
+        gemini_client = get_client()
         image_path = row["path"]
 
-        # Derive term/subject/context from the filename as a best-effort fallback
+        # Derive term/subject/context from filename as best-effort
         stem = Path(image_path).stem.replace("_final", "").replace("_", " ").strip()
-        term = stem
-        subject = stem
-        context = f"A wearable graphic design representing: {stem}"
 
-        regen_prompt = generate_single_regen(
-            client=client,
-            term=term,
-            subject=subject,
-            context=context,
+        imagen_prompt = generate_single_regen(
+            client=gemini_client,
+            term=stem,
+            subject=stem,
+            context=f"A wearable graphic design representing: {stem}",
             user_prompt=user_prompt,
         )
 
-        full_prompt = f"{regen_prompt}, flat vector illustration, die-cut sticker style."
-        new_paths = generate_images(
-            project_id, location, [full_prompt], out_dir=str(ASSETS_DIR)
+        new_paths = generate_from_prompt(
+            project_id=project_id,
+            location=location,
+            imagen_prompt=imagen_prompt,
+            out_dir=str(ASSETS_DIR),
         )
 
-        if not new_paths or not os.path.exists(new_paths[0]):
+        if not new_paths or not Path(new_paths[0]).exists():
             return jsonify({"message": "Image generation produced no output"}), 500
 
-        # Replace the existing file in-place so the same DB record stays valid
-        import shutil
+        # Replace existing file in-place — DB record stays valid
         shutil.move(new_paths[0], image_path)
 
-        return jsonify({"message": "Regenerated successfully."})
+        # Re-screen the new image
+        screen = screen_generated_image(gemini_client, image_path)
+        risk_level = screen.get("risk_level", "LOW")
+        risk_reason = screen.get("risk_reason")
+
+        # Update risk fields in DB
+        with get_db() as conn:
+            conn.execute(
+                """
+                UPDATE designs
+                SET risk_level = ?, risk_reason = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (risk_level, risk_reason, design_id),
+            )
+            conn.commit()
+
+        return jsonify({
+            "message": "Regenerated successfully.",
+            "risk_level": risk_level,
+            "risk_reason": risk_reason,
+        })
 
     except Exception as exc:
         return jsonify({"message": f"Regeneration failed: {exc}"}), 500
+
+
+# ---------------------------------------------------------------------------
+# Bootstrap
+# ---------------------------------------------------------------------------
 
 def bootstrap() -> None:
     init_db()
