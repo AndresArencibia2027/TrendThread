@@ -8,15 +8,10 @@ from dotenv import load_dotenv
 from flask import Flask, jsonify, request, send_file
 from werkzeug.utils import secure_filename
 
-from src.fetchers.bq_client import get_rising_trends
-from src.fetchers.gdelt_client import fetch_gdelt_articles
-from src.fetchers.image_fetcher import fetch_and_save_visuals
-from src.processors.download_confirmed_memes import main as run_kym_scraper
+from src.fetchers.trends_client import discover_trends
 from src.processors.gemini_analyzer import (
-    analyze_visual_strategy,
     distill_search_terms,
     distill_theme_terms,
-    generate_single_regen,
     get_client,
 )
 from src.integrations.printify_client import (
@@ -32,8 +27,6 @@ load_dotenv()
 BASE_DIR = Path(__file__).resolve().parents[2]
 ASSETS_DIR = BASE_DIR / "output" / "final_assets"
 DB_PATH = BASE_DIR / "output" / "review_queue.db"
-KYM_DIR = BASE_DIR / "output" / "references" / "downloaded_confirmed_memes"
-
 DEFAULT_BLUEPRINT_ID = int(os.getenv("PRINTIFY_BLUEPRINT_ID", "6"))
 DEFAULT_PROVIDER_ID = int(os.getenv("PRINTIFY_PRINT_PROVIDER_ID", "1"))
 DEFAULT_VARIANT_IDS = [
@@ -71,11 +64,10 @@ def init_db() -> None:
             )
             """
         )
-        # Migrate existing DBs that pre-date the risk_level column
         try:
             conn.execute("ALTER TABLE designs ADD COLUMN risk_level TEXT NOT NULL DEFAULT 'LOW'")
         except Exception:
-            pass  # Column already exists
+            pass
         try:
             conn.execute("ALTER TABLE designs ADD COLUMN risk_reason TEXT")
         except Exception:
@@ -162,15 +154,6 @@ def get_queue_counts() -> Dict[str, int]:
     return counts
 
 
-def get_local_kym_context():
-    kym_entries = []
-    if KYM_DIR.exists():
-        for file in KYM_DIR.glob("*"):
-            if file.suffix.lower() in [".jpg", ".png", ".webp"]:
-                clean_title = file.stem.split("_", 1)[-1].replace("_", " ")
-                kym_entries.append({"title": clean_title, "path": str(file)})
-    return kym_entries
-
 
 # ---------------------------------------------------------------------------
 # Design generation
@@ -183,48 +166,31 @@ def generate_top_designs(theme: str = "") -> Dict[str, object]:
         raise RuntimeError("Set VERTEX_PROJECT_ID in .env to generate designs.")
 
     client = get_client()
-    bq_raw = get_rising_trends(limit=40)
-    gdelt_query = "(viral OR trending OR popular)"
-    if theme:
-        gdelt_query = f"({gdelt_query}) AND ({theme})"
-    gdelt_raw = fetch_gdelt_articles(query=gdelt_query, maxrecords=15)
-
-    run_kym_scraper(start_page=1, end_page=1)
-    kym_context = get_local_kym_context()
 
     if theme:
-        # Theme mode: bypass trend pipeline, generate theme-locked motifs
         trend_data = distill_theme_terms(client=client, theme=theme)
     else:
+        # Primary: Reddit trending posts (real signals, not hallucinations)
+        reddit_terms = discover_trends(gemini_client=client, limit=40)
+        if not reddit_terms:
+            return {"count": 0, "paths": []}
+
         trend_data = distill_search_terms(
             client=client,
-            bq_context=bq_raw,
-            gdelt_context=gdelt_raw,
-            excel_path=None,
-            kym_context=kym_context,
+            bq_context=reddit_terms,  # field name kept for interface compatibility
         )
 
     if not trend_data:
         return {"count": 0, "paths": []}
 
-    trend_visuals_map = {}
-    for item in trend_data:
-        term = item["term"].strip()
-        local_images = fetch_and_save_visuals(term, num_results=5)
-        if local_images:
-            trend_visuals_map[term] = local_images
-
-    visual_report = analyze_visual_strategy(client, trend_visuals_map, trend_data)
-
-    # process_final_assets now returns result dicts with risk metadata
     asset_results = process_final_assets(
-        visual_report=visual_report,
+        trend_data=trend_data,
         project_id=project_id,
         location=location,
         gemini_client=client,
+        is_theme_mode=bool(theme),
     )
 
-    # Sort by most recently modified and take the freshest 5
     fresh_results = sorted(
         asset_results,
         key=lambda r: Path(r["path"]).stat().st_mtime if Path(r["path"]).exists() else 0,
@@ -265,66 +231,60 @@ def update_design_status(
         conn.commit()
 
 
-def build_listing_title(image_path: str) -> str:
-    stem = Path(image_path).stem.replace("_final", "").replace("_", " ").strip()
-    stem = stem.title() if stem else "TrendThread Design"
-    return f"{stem} Unisex Tee"
-
-
-def publish_to_printify(image_path: str) -> str:
-    client = build_client_from_env()
+def _get_printify_shop_id(client) -> str:
     shop_id = os.getenv("PRINTIFY_SHOP_ID", "").strip()
     if not shop_id:
         shops = client.get_shops()
         if not shops:
             raise RuntimeError("No Printify shops found for this API token.")
         shop_id = str(shops[0]["id"])
+    return shop_id
 
-    upload_id = client.upload_image(image_path)
-    title = build_listing_title(image_path)
-    description = (
-        "Original TrendThread design printed on a comfortable unisex tee. "
-        "Made to order and fulfilled through our Printify production network."
-    )
-    tags = ["trend", "meme", "streetwear", "gift", "graphic tee"]
 
-    template_product = None
+def _get_template_product(client, shop_id: str):
     try:
         template_id = os.getenv("PRINTIFY_TEMPLATE_PRODUCT_ID", "").strip()
         if template_id:
-            template_product = client.get_product(shop_id=shop_id, product_id=template_id)
-        else:
-            products_result = client.get_products(shop_id=shop_id, page=1, limit=1)
-            products = products_result.get("data", [])
-            if products:
-                template_product = client.get_product(
-                    shop_id=shop_id, product_id=str(products[0]["id"])
-                )
+            return client.get_product(shop_id=shop_id, product_id=template_id)
+        products_result = client.get_products(shop_id=shop_id, page=1, limit=1)
+        products = products_result.get("data", [])
+        if products:
+            return client.get_product(shop_id=shop_id, product_id=str(products[0]["id"]))
     except Exception:
-        template_product = None
+        pass
+    return None
 
+
+def _build_product_payload(copy: dict, template_product, upload_id: str) -> dict:
     if template_product:
-        payload = build_payload_from_template(
-            title=title,
-            description=description,
-            tags=tags,
+        return build_payload_from_template(
+            title=copy["title"],
+            description=copy["description"],
+            tags=copy["tags"],
             template_product=template_product,
             upload_id=upload_id,
         )
-    else:
-        payload = build_tshirt_payload(
-            title=title,
-            description=description,
-            tags=tags,
-            blueprint_id=DEFAULT_BLUEPRINT_ID,
-            print_provider_id=DEFAULT_PROVIDER_ID,
-            variant_ids=DEFAULT_VARIANT_IDS,
-            upload_id=upload_id,
-        )
-    product = client.create_product(shop_id=shop_id, payload=payload)
-    product_id = str(product["id"])
-    client.publish_product(shop_id=shop_id, product_id=product_id)
-    return product_id
+    return build_tshirt_payload(
+        title=copy["title"],
+        description=copy["description"],
+        tags=copy["tags"],
+        blueprint_id=DEFAULT_BLUEPRINT_ID,
+        print_provider_id=DEFAULT_PROVIDER_ID,
+        variant_ids=DEFAULT_VARIANT_IDS,
+        upload_id=upload_id,
+    )
+
+
+def _pick_mockup_urls(mockups: list) -> list:
+    preferred_keywords = ["Front 2", "Hanging 1", "Person 1", "Person 2", "Person 3"]
+    preferred = [
+        m.get("src") for m in mockups
+        if any(kw in m.get("title", "") for kw in preferred_keywords)
+        and m.get("src")
+    ]
+    if preferred:
+        return preferred
+    return [m.get("src") for m in mockups if m.get("src")][:3]
 
 
 # ---------------------------------------------------------------------------
@@ -399,7 +359,7 @@ def index():
         box-shadow: 0 24px 60px rgba(0,0,0,.45);
         touch-action: pan-y;
       }
-      img {
+      img.design-img {
         width: 100%;
         min-height: 420px;
         max-height: 620px;
@@ -407,7 +367,6 @@ def index():
         border-radius: 16px;
         background: #0f1422;
       }
-      /* Risk banners */
       .risk-banner {
         display: none;
         margin-top: 8px;
@@ -462,6 +421,7 @@ def index():
         font-weight: 800;
         cursor: pointer;
       }
+
       /* Regen modal */
       .regen-modal {
         display: none;
@@ -502,6 +462,96 @@ def index():
       }
       .regen-cancel  { background: #1e2d4a; color: #a7b6d8; }
       .regen-confirm { background: linear-gradient(135deg, #b38600, #d4a000); color: #fff; }
+
+      /* Loading overlay */
+      .loading-overlay {
+        display: none;
+        position: fixed;
+        inset: 0;
+        background: rgba(8, 11, 18, 0.82);
+        backdrop-filter: blur(6px);
+        z-index: 300;
+        align-items: center;
+        justify-content: center;
+        flex-direction: column;
+        gap: 18px;
+      }
+      .loading-overlay.open { display: flex; }
+      .loading-spinner {
+        width: 48px;
+        height: 48px;
+        border: 4px solid rgba(91, 125, 255, 0.2);
+        border-top-color: #5b7dff;
+        border-radius: 50%;
+        animation: spin 0.9s linear infinite;
+      }
+      @keyframes spin { to { transform: rotate(360deg); } }
+      .loading-text {
+        color: #a7b6d8;
+        font-size: 15px;
+        font-weight: 600;
+        text-align: center;
+        max-width: 300px;
+        line-height: 1.5;
+        transition: opacity 0.3s;
+      }
+
+      /* Preview modal */
+      .preview-modal {
+        display: none;
+        position: fixed;
+        inset: 0;
+        background: rgba(0,0,0,.75);
+        backdrop-filter: blur(6px);
+        z-index: 200;
+        align-items: flex-start;
+        justify-content: center;
+        overflow-y: auto;
+        padding: 24px 16px;
+      }
+      .preview-modal.open { display: flex; }
+      .preview-box {
+        background: #131d34;
+        border: 1px solid rgba(156,178,231,.3);
+        border-radius: 18px;
+        padding: 24px 20px 20px;
+        width: min(560px, 100%);
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+        margin: auto;
+      }
+      .preview-box h3 { margin: 0; font-size: 18px; color: #f4f7ff; }
+      .preview-label {
+        font-size: 12px;
+        font-weight: 700;
+        color: #7a90c2;
+        text-transform: uppercase;
+        letter-spacing: .06em;
+        margin-bottom: 4px;
+      }
+      .preview-box input[type="text"],
+      .preview-box textarea {
+        width: 100%;
+        border: 1px solid #2a395f;
+        border-radius: 10px;
+        padding: 10px 12px;
+        background: #0f1828;
+        color: #f4f7ff;
+        font-size: 14px;
+        font-family: inherit;
+        resize: vertical;
+      }
+      .preview-box textarea { min-height: 140px; }
+      .preview-actions { display: flex; gap: 8px; margin-top: 4px; }
+      .preview-actions button {
+        flex: 1; padding: 13px; border: 0; border-radius: 999px;
+        font-weight: 700; font-size: 14px; cursor: pointer;
+      }
+      .preview-cancel  { background: #1e2d4a; color: #a7b6d8; }
+      .preview-confirm { background: linear-gradient(135deg, #21b867, #168d4c); color: #fff; }
+      .preview-loading { color: #a7b6d8; font-size: 14px; text-align: center; padding: 28px 0; }
+
       .status {
         margin: 12px auto 0;
         max-width: 560px;
@@ -512,7 +562,7 @@ def index():
       @media (max-width: 560px) {
         .title { font-size: 27px; }
         .toolbar { grid-template-columns: 1fr; }
-        img { min-height: 320px; }
+        img.design-img { min-height: 320px; }
       }
     </style>
   </head>
@@ -530,7 +580,7 @@ def index():
       <div class="card-shell">
         <div class="card-shadow"></div>
         <div class="card" id="swipe-card">
-          <img id="design-image" src="" alt="design" />
+          <img class="design-img" id="design-image" src="" alt="design" />
           <div class="risk-banner" id="risk-banner"></div>
           <div class="meta">
             <span id="design-meta">Loading...</span>
@@ -538,7 +588,7 @@ def index():
           </div>
           <div class="actions">
             <button class="reject"  onclick="decide('reject')">Dislike</button>
-            <button class="approve" onclick="decide('approve')">Like + Publish</button>
+            <button class="approve" onclick="openPreview()">Like + Publish</button>
           </div>
           <div class="regen-wrap">
             <button class="regen-btn" onclick="openRegenModal()">⟳ Regenerate</button>
@@ -546,6 +596,12 @@ def index():
         </div>
       </div>
       <div class="status" id="status"></div>
+    </div>
+
+    <!-- Loading overlay -->
+    <div class="loading-overlay" id="loading-overlay">
+      <div class="loading-spinner"></div>
+      <div class="loading-text" id="loading-text">Starting…</div>
     </div>
 
     <!-- Regen modal -->
@@ -557,6 +613,33 @@ def index():
         <div class="regen-box-actions">
           <button class="regen-cancel"  onclick="closeRegenModal()">Cancel</button>
           <button class="regen-confirm" onclick="confirmRegen()">Regenerate</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Preview modal -->
+    <div class="preview-modal" id="preview-modal">
+      <div class="preview-box">
+        <h3>Preview Before Publishing</h3>
+        <div id="preview-loading" class="preview-loading">Generating listing copy and mockups…</div>
+        <div id="preview-content" style="display:none; flex-direction:column; gap:14px;">
+          <div>
+            <div class="preview-label">Design</div>
+            <img id="preview-design-img" src="" alt="design preview"
+              style="width:100%; border-radius:12px; background:#0f1422; object-fit:contain; max-height:300px;" />
+          </div>
+          <div>
+            <div class="preview-label">Title</div>
+            <input type="text" id="preview-title" maxlength="140" />
+          </div>
+          <div>
+            <div class="preview-label">Description</div>
+            <textarea id="preview-description"></textarea>
+          </div>
+          <div class="preview-actions">
+            <button class="preview-cancel"  onclick="closePreview()">Cancel</button>
+            <button class="preview-confirm" onclick="confirmPublish()">Publish Now</button>
+          </div>
         </div>
       </div>
     </div>
@@ -577,7 +660,6 @@ def index():
           banner.classList.add('medium');
           banner.innerText = '⚠ Review flagged — ' + (riskReason || 'Potential IP concern. Use judgement before publishing.');
         }
-        // LOW: banner stays hidden (no class added)
       }
 
       async function loadNext() {
@@ -619,17 +701,57 @@ def index():
         await loadNext();
       }
 
+      const GENERATION_STEPS = [
+        "Fetching trending signals…",
+        "Distilling top motifs from trend data…",
+        "Pulling reference images…",
+        "Analysing visual strategy…",
+        "Generating designs with Imagen 4…",
+        "Screening for IP risks…",
+        "Finalising assets…",
+      ];
+
+      let loadingInterval = null;
+
+      function showLoadingOverlay() {
+        const overlay = document.getElementById('loading-overlay');
+        const text = document.getElementById('loading-text');
+        overlay.classList.add('open');
+        let step = 0;
+        text.innerText = GENERATION_STEPS[0];
+        loadingInterval = setInterval(() => {
+          step = Math.min(step + 1, GENERATION_STEPS.length - 1);
+          text.style.opacity = '0';
+          setTimeout(() => {
+            text.innerText = GENERATION_STEPS[step];
+            text.style.opacity = '1';
+          }, 300);
+        }, 12000); // ~12s per stage
+      }
+
+      function hideLoadingOverlay() {
+        clearInterval(loadingInterval);
+        loadingInterval = null;
+        document.getElementById('loading-overlay').classList.remove('open');
+      }
+
       async function generateDesigns() {
         const theme = document.getElementById('theme-input').value.trim();
-        document.getElementById('status').innerText = 'Generating top 5 designs...';
-        const resp = await fetch('/api/generate', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({theme})
-        });
-        const data = await resp.json();
-        document.getElementById('status').innerText = data.message;
-        await loadNext();
+        showLoadingOverlay();
+        try {
+          const resp = await fetch('/api/generate', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({theme})
+          });
+          const data = await resp.json();
+          hideLoadingOverlay();
+          document.getElementById('status').innerText = data.message;
+          await loadNext();
+        } catch (err) {
+          hideLoadingOverlay();
+          document.getElementById('status').innerText = 'Generation request failed.';
+        }
       }
 
       function triggerUpload() {
@@ -654,7 +776,7 @@ def index():
 
       document.getElementById('file-input').addEventListener('change', uploadDesign);
 
-      // Regen modal
+      // ---- Regen modal ----
       function openRegenModal() {
         if (!current) {
           document.getElementById('status').innerText = 'No active design to regenerate.';
@@ -683,7 +805,6 @@ def index():
             img.src = '/api/image/' + current.id + '?t=' + Date.now();
             img.style.opacity = '1';
             document.getElementById('status').innerText = data.message;
-            // Refresh risk banner from updated design data
             if (data.risk_level) {
               showRiskBanner(data.risk_level, data.risk_reason || '');
             }
@@ -697,12 +818,78 @@ def index():
         }
       }
 
+      // ---- Preview modal ----
+      async function openPreview() {
+        if (!current) {
+          document.getElementById('status').innerText = 'No active design.';
+          return;
+        }
+        // Reset and open modal in loading state
+        document.getElementById('preview-loading').style.display = 'block';
+        document.getElementById('preview-content').style.display = 'none';
+        document.getElementById('preview-modal').classList.add('open');
+        document.getElementById('status').innerText = 'Generating listing copy…';
+
+        try {
+          const resp = await fetch('/api/preview', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ id: current.id })
+          });
+          const data = await resp.json();
+
+          if (!resp.ok) {
+            closePreview();
+            document.getElementById('status').innerText = data.message || 'Preview failed.';
+            return;
+          }
+
+          // Show the design image
+          document.getElementById('preview-design-img').src = data.design_image_url + '?t=' + Date.now();
+
+          // Populate editable fields
+          document.getElementById('preview-title').value = data.title || '';
+          document.getElementById('preview-description').value = data.description || '';
+
+          document.getElementById('preview-loading').style.display = 'none';
+          document.getElementById('preview-content').style.display = 'flex';
+          document.getElementById('status').innerText = '';
+
+        } catch (err) {
+          closePreview();
+          document.getElementById('status').innerText = 'Preview request failed.';
+        }
+      }
+
+      function closePreview() {
+        document.getElementById('preview-modal').classList.remove('open');
+      }
+
+      async function confirmPublish() {
+        const title = document.getElementById('preview-title').value.trim();
+        const description = document.getElementById('preview-description').value.trim();
+        closePreview();
+        document.getElementById('status').innerText = 'Publishing…';
+        try {
+          const resp = await fetch('/api/confirm', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ id: current.id, title, description })
+          });
+          const data = await resp.json();
+          document.getElementById('status').innerText = data.message;
+          await loadNext();
+        } catch (err) {
+          document.getElementById('status').innerText = 'Publish request failed.';
+        }
+      }
+
       // Touch swipe
       card.addEventListener('touchstart', (e) => { startX = e.touches[0].clientX; });
       card.addEventListener('touchmove',  (e) => { deltaX = e.touches[0].clientX - startX; });
       card.addEventListener('touchend', async () => {
         if (Math.abs(deltaX) > 80) {
-          if (deltaX > 0) await decide('approve');
+          if (deltaX > 0) await openPreview();
           if (deltaX < 0) await decide('reject');
         }
         startX = 0;
@@ -712,7 +899,7 @@ def index():
       // Keyboard shortcuts
       window.addEventListener('keydown', (e) => {
         if (e.key === 'ArrowLeft')  decide('reject');
-        if (e.key === 'ArrowRight') decide('approve');
+        if (e.key === 'ArrowRight') openPreview();
       });
 
       loadNext();
@@ -758,10 +945,124 @@ def api_decision():
         update_design_status(design_id, "rejected")
         return jsonify({"message": "Rejected."})
 
+    # approve goes through /api/preview + /api/confirm now,
+    # but keep this path as a direct fallback if needed
     try:
-        product_id = publish_to_printify(row["path"])
+        from src.integrations.printify_client import generate_listing_copy
+        image_path = row["path"]
+        stem = Path(image_path).stem.replace("_final", "").replace("_", " ").strip()
+        gemini_client = get_client()
+        copy = generate_listing_copy(
+            gemini_client=gemini_client,
+            term=stem, subject=stem,
+            context=f"A trending graphic tee design: {stem}",
+            topic_type="GENERAL",
+        )
+        printify = build_client_from_env()
+        shop_id = _get_printify_shop_id(printify)
+        upload_id = printify.upload_image(image_path)
+        template_product = _get_template_product(printify, shop_id)
+        product_payload = _build_product_payload(copy, template_product, upload_id)
+        product = printify.create_product(shop_id=shop_id, payload=product_payload)
+        product_id = str(product["id"])
+        printify.publish_product(shop_id=shop_id, product_id=product_id)
         update_design_status(design_id, "published", printify_product_id=product_id)
         return jsonify({"message": f"Published to Printify. Product ID: {product_id}"})
+    except Exception as exc:
+        update_design_status(design_id, "failed", error_message=str(exc))
+        return jsonify({"message": f"Publish failed: {exc}"}), 500
+
+
+@app.post("/api/preview")
+def api_preview():
+    """
+    Generates listing copy only — no Printify product is created yet.
+    The design image URL is returned so the preview modal can show it.
+    Nothing is created or charged until the user clicks Publish Now.
+    """
+    payload = request.get_json(silent=True) or {}
+    design_id = payload.get("id")
+
+    if not design_id:
+        return jsonify({"message": "Missing design id"}), 400
+
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT id, path FROM designs WHERE id = ?", (design_id,)
+        ).fetchone()
+    if not row:
+        return jsonify({"message": "Design not found"}), 404
+
+    try:
+        from src.integrations.printify_client import generate_listing_copy
+
+        image_path = row["path"]
+        stem = Path(image_path).stem.replace("_final", "").replace("_", " ").strip()
+
+        gemini_client = get_client()
+        copy = generate_listing_copy(
+            gemini_client=gemini_client,
+            term=stem, subject=stem,
+            context=f"A trending graphic tee design: {stem}",
+            topic_type="GENERAL",
+        )
+
+        return jsonify({
+            "design_image_url": f"/api/image/{design_id}",
+            "title": copy["title"],
+            "description": copy["description"],
+            "tags": copy["tags"],
+        })
+
+    except Exception as exc:
+        return jsonify({"message": f"Preview failed: {exc}"}), 500
+
+
+@app.post("/api/confirm")
+def api_confirm():
+    """
+    Creates the Printify product and publishes it in one step,
+    using the title/description the user confirmed (or edited) in the preview modal.
+    """
+    payload = request.get_json(silent=True) or {}
+    design_id = payload.get("id")
+    title = (payload.get("title") or "").strip()
+    description = (payload.get("description") or "").strip()
+
+    if not design_id:
+        return jsonify({"message": "Missing design id"}), 400
+
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT path FROM designs WHERE id = ?", (design_id,)
+        ).fetchone()
+    if not row:
+        return jsonify({"message": "Design not found"}), 404
+
+    try:
+        image_path = row["path"]
+        stem = Path(image_path).stem.replace("_final", "").replace("_", " ").strip()
+
+        # Use the user's edited copy; fall back to stem-based title if somehow empty
+        copy = {
+            "title": title or f"{stem.title()} Unisex Tee",
+            "description": description or f"Original TrendThread design: {stem}.",
+            "tags": ["trend", "meme", "streetwear", "gift", "graphic tee"],
+        }
+
+        printify = build_client_from_env()
+        shop_id = _get_printify_shop_id(printify)
+        upload_id = printify.upload_image(image_path)
+        template_product = _get_template_product(printify, shop_id)
+        product_payload = _build_product_payload(copy, template_product, upload_id)
+
+        product = printify.create_product(shop_id=shop_id, payload=product_payload)
+        product_id = str(product["id"])
+        printify.publish_product(shop_id=shop_id, product_id=product_id)
+
+        update_design_status(design_id, "published", printify_product_id=product_id)
+        return jsonify({"message": f"Published. Product ID: {product_id}"})
+
     except Exception as exc:
         update_design_status(design_id, "failed", error_message=str(exc))
         return jsonify({"message": f"Publish failed: {exc}"}), 500
@@ -821,43 +1122,41 @@ def api_regenerate():
         return jsonify({"message": "VERTEX_PROJECT_ID not set"}), 500
 
     try:
-        from src.processors.image_generator import generate_from_prompt
+        from src.fetchers.market_research import fetch_reference_images, MIN_VALID_REFERENCES
+        from src.processors.image_generator import generate_shirt_design
         from src.processors.ip_screener import screen_generated_image
         import shutil
 
         gemini_client = get_client()
         image_path = row["path"]
-
-        # Derive term/subject/context from filename as best-effort
         stem = Path(image_path).stem.replace("_final", "").replace("_", " ").strip()
 
-        imagen_prompt = generate_single_regen(
-            client=gemini_client,
-            term=stem,
-            subject=stem,
-            context=f"A wearable graphic design representing: {stem}",
-            user_prompt=user_prompt,
-        )
+        # Use term as search key — same flow as initial generation.
+        # If user_prompt was provided, append it to the query for refinement.
+        search_term = f"{stem} {user_prompt}".strip() if user_prompt else stem
 
-        new_paths = generate_from_prompt(
-            project_id=project_id,
-            location=location,
-            imagen_prompt=imagen_prompt,
-            out_dir=str(ASSETS_DIR),
-        )
+        references = fetch_reference_images(term=search_term, max_images=5)
+        if len(references) < MIN_VALID_REFERENCES:
+            return jsonify({
+                "message": f"Insufficient reference images for '{search_term}' — try a different term"
+            }), 400
 
-        if not new_paths or not Path(new_paths[0]).exists():
+        # Generate to a temp path, then move into place on success
+        tmp_path = str(ASSETS_DIR / f"_regen_{design_id}.png")
+        gen_path = generate_shirt_design(
+            reference_images=references,
+            out_path=tmp_path,
+            term=search_term,
+        )
+        if not gen_path or not Path(gen_path).exists():
             return jsonify({"message": "Image generation produced no output"}), 500
 
-        # Replace existing file in-place — DB record stays valid
-        shutil.move(new_paths[0], image_path)
+        shutil.move(gen_path, image_path)
 
-        # Re-screen the new image
         screen = screen_generated_image(gemini_client, image_path)
         risk_level = screen.get("risk_level", "LOW")
         risk_reason = screen.get("risk_reason")
 
-        # Update risk fields in DB
         with get_db() as conn:
             conn.execute(
                 """

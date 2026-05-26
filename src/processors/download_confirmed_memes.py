@@ -9,7 +9,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 import requests
 
-from src.fetchers.confirmed_memes_pages import fetch_entries
+from src.fetchers.Deprecated.confirmed_memes_pages import fetch_entries
 
 # Updated to store in the centralized output folder
 OUTPUT_DIR = Path("output/references/downloaded_confirmed_memes")

@@ -6,9 +6,9 @@ from dotenv import load_dotenv
 # Path fixing for local imports
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from src.fetchers.bq_client import get_rising_trends
-from src.fetchers.gdelt_client import fetch_gdelt_articles
-from src.fetchers.x_scraper import run_full_x_scraper
+from src.fetchers.Deprecated.bq_client import get_rising_trends
+from src.fetchers.Deprecated.gdelt_client import fetch_gdelt_articles
+from src.fetchers.Deprecated.x_scraper import run_full_x_scraper
 from src.fetchers.image_fetcher import fetch_and_save_visuals
 from src.processors.download_confirmed_memes import main as run_kym_scraper
 from src.processors.gemini_analyzer import (
