@@ -131,7 +131,7 @@ Do NOT add subject descriptions. Do NOT put terms in quotes. Do NOT use markdown
 
     try:
         response = client.models.generate_content(
-            model="gemini-2.0-flash",
+            model="gemini-2.5-flash",
             config=types.GenerateContentConfig(system_instruction=system_instruction),
             contents=f"TRENDING SEARCHES:\n{trend_lines}\n\nSelect up to 5 wearable motifs (or fewer if fewer pass the test).",
         )
@@ -223,7 +223,7 @@ TERM: [unique term] | TOPIC_TYPE: [type]
 """
     try:
         response = client.models.generate_content(
-            model="gemini-2.0-flash",
+            model="gemini-2.5-flash",
             config=types.GenerateContentConfig(system_instruction=system_instruction),
             contents=(
                 f'Generate 5 motifs for "{theme}" with 5 DIFFERENT terms. '

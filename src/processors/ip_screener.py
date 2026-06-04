@@ -192,7 +192,7 @@ def screen_generated_image(client, image_path: str) -> dict:
         img_part = types.Part.from_bytes(data=img_bytes, mime_type="image/png")
 
         response = client.models.generate_content(
-            model="gemini-2.0-flash",
+            model="gemini-2.5-flash",
             config=types.GenerateContentConfig(system_instruction=system_instruction),
             contents=[img_part, "Screen this image for IP and copyright risk."],
         )
