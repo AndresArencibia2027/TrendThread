@@ -32,6 +32,11 @@ def generate_shirt_design(
     """
     Generates a shirt design from reference images.
     Returns the saved path, or None if generation failed.
+
+    Output is the design graphic ONLY — no shirt mockup, no fabric,
+    no person wearing it, no solid background fill. The references
+    typically show full shirt photos; the output should be just the
+    isolated artwork that would go ON a shirt.
     """
     api_key = os.getenv("GOOGLE_API_KEY", "").strip()
     if not api_key:
@@ -45,13 +50,24 @@ def generate_shirt_design(
     client = genai.Client(api_key=api_key)
 
     instruction = (
-        "These images are reference shirt designs. "
-        "Create a new shirt design that fits visually with these references — "
-        "same style, same aesthetic, same kind of subject matter and composition. "
-        "It should look like it belongs in the same collection as these shirts, "
-        "but be an original design (not a copy of any specific one shown).\n\n"
-        "Output only the design graphic itself on a clean white background — "
-        "no shirt, no mockup, no person wearing it, no product photo."
+        "The attached images are reference shirt designs — full shirt photos "
+        "showing the artwork printed on them. Study the ARTWORK in each "
+        "reference (ignore the shirt, fabric, model, and background).\n\n"
+        "Create a new ORIGINAL design that fits visually with these references: "
+        "same illustration style, same aesthetic, same kind of subject matter, "
+        "same composition approach. It should look like it belongs in the same "
+        "collection as these designs, but be original — not a copy of any "
+        "specific reference.\n\n"
+        "CRITICAL OUTPUT REQUIREMENTS:\n"
+        "- Output ONLY the design artwork itself — the graphic that would be "
+        "printed on a shirt, not a shirt with the graphic on it.\n"
+        "- The background must be fully TRANSPARENT (alpha channel). "
+        "Do NOT fill the background with white, black, or any solid color. "
+        "Do NOT add a backdrop, scene, or environment.\n"
+        "- Do NOT include any shirt, fabric, mannequin, model, hanger, person, "
+        "product mockup, or photo composition. Just the isolated artwork.\n"
+        "- The design's own colors and details should be vivid and complete, "
+        "but everything outside the design itself should be transparent."
     )
 
     content_parts: list = [instruction]
@@ -96,6 +112,9 @@ def generate_shirt_design(
                     raw_bytes = part.inline_data.data
                     try:
                         img = Image.open(io.BytesIO(raw_bytes))
+                        # Preserve alpha if present; convert to RGBA otherwise
+                        if img.mode != "RGBA":
+                            img = img.convert("RGBA")
                         img.save(out_path, format="PNG")
                     except Exception:
                         with open(out_path, "wb") as f:
