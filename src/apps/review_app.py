@@ -16,8 +16,8 @@ from src.processors.gemini_analyzer import (
 )
 from src.integrations.printify_client import (
     build_client_from_env,
-    build_payload_from_template,
-    build_tshirt_payload,
+    create_and_publish_product,
+    generate_listing_copy,
 )
 from src.utils.asset_engine import process_final_assets
 
@@ -27,13 +27,6 @@ load_dotenv()
 BASE_DIR = Path(__file__).resolve().parents[2]
 ASSETS_DIR = BASE_DIR / "output" / "final_assets"
 DB_PATH = BASE_DIR / "output" / "review_queue.db"
-DEFAULT_BLUEPRINT_ID = int(os.getenv("PRINTIFY_BLUEPRINT_ID", "6"))
-DEFAULT_PROVIDER_ID = int(os.getenv("PRINTIFY_PRINT_PROVIDER_ID", "1"))
-DEFAULT_VARIANT_IDS = [
-    int(item.strip())
-    for item in os.getenv("PRINTIFY_VARIANT_IDS", "40176,40177,40178,40179").split(",")
-    if item.strip()
-]
 
 
 # ---------------------------------------------------------------------------
@@ -170,7 +163,7 @@ def generate_top_designs(theme: str = "") -> Dict[str, object]:
     if theme:
         trend_data = distill_theme_terms(client=client, theme=theme)
     else:
-        # Primary: Reddit trending posts (real signals, not hallucinations)
+        # Primary: Google Trends + curated fallback (no more Reddit news)
         reddit_terms = discover_trends(gemini_client=client, limit=40)
         if not reddit_terms:
             return {"count": 0, "paths": []}
@@ -239,52 +232,6 @@ def _get_printify_shop_id(client) -> str:
             raise RuntimeError("No Printify shops found for this API token.")
         shop_id = str(shops[0]["id"])
     return shop_id
-
-
-def _get_template_product(client, shop_id: str):
-    try:
-        template_id = os.getenv("PRINTIFY_TEMPLATE_PRODUCT_ID", "").strip()
-        if template_id:
-            return client.get_product(shop_id=shop_id, product_id=template_id)
-        products_result = client.get_products(shop_id=shop_id, page=1, limit=1)
-        products = products_result.get("data", [])
-        if products:
-            return client.get_product(shop_id=shop_id, product_id=str(products[0]["id"]))
-    except Exception:
-        pass
-    return None
-
-
-def _build_product_payload(copy: dict, template_product, upload_id: str) -> dict:
-    if template_product:
-        return build_payload_from_template(
-            title=copy["title"],
-            description=copy["description"],
-            tags=copy["tags"],
-            template_product=template_product,
-            upload_id=upload_id,
-        )
-    return build_tshirt_payload(
-        title=copy["title"],
-        description=copy["description"],
-        tags=copy["tags"],
-        blueprint_id=DEFAULT_BLUEPRINT_ID,
-        print_provider_id=DEFAULT_PROVIDER_ID,
-        variant_ids=DEFAULT_VARIANT_IDS,
-        upload_id=upload_id,
-    )
-
-
-def _pick_mockup_urls(mockups: list) -> list:
-    preferred_keywords = ["Front 2", "Hanging 1", "Person 1", "Person 2", "Person 3"]
-    preferred = [
-        m.get("src") for m in mockups
-        if any(kw in m.get("title", "") for kw in preferred_keywords)
-        and m.get("src")
-    ]
-    if preferred:
-        return preferred
-    return [m.get("src") for m in mockups if m.get("src")][:3]
 
 
 # ---------------------------------------------------------------------------
@@ -706,7 +653,7 @@ def index():
         "Distilling top motifs from trend data…",
         "Pulling reference images…",
         "Analysing visual strategy…",
-        "Generating designs with Imagen 4…",
+        "Generating designs with Gemini 3 Pro Image…",
         "Screening for IP risks…",
         "Finalising assets…",
       ];
@@ -948,7 +895,6 @@ def api_decision():
     # approve goes through /api/preview + /api/confirm now,
     # but keep this path as a direct fallback if needed
     try:
-        from src.integrations.printify_client import generate_listing_copy
         image_path = row["path"]
         stem = Path(image_path).stem.replace("_final", "").replace("_", " ").strip()
         gemini_client = get_client()
@@ -960,14 +906,17 @@ def api_decision():
         )
         printify = build_client_from_env()
         shop_id = _get_printify_shop_id(printify)
-        upload_id = printify.upload_image(image_path)
-        template_product = _get_template_product(printify, shop_id)
-        product_payload = _build_product_payload(copy, template_product, upload_id)
-        product = printify.create_product(shop_id=shop_id, payload=product_payload)
+        product = create_and_publish_product(
+            client=printify,
+            shop_id=shop_id,
+            image_path=image_path,
+            title=copy["title"],
+            description=copy["description"],
+            tags=copy["tags"],
+        )
         product_id = str(product["id"])
-        printify.publish_product(shop_id=shop_id, product_id=product_id)
         update_design_status(design_id, "published", printify_product_id=product_id)
-        return jsonify({"message": f"Published to Printify. Product ID: {product_id}"})
+        return jsonify({"message": f"Published to Etsy. Product ID: {product_id}"})
     except Exception as exc:
         update_design_status(design_id, "failed", error_message=str(exc))
         return jsonify({"message": f"Publish failed: {exc}"}), 500
@@ -994,8 +943,6 @@ def api_preview():
         return jsonify({"message": "Design not found"}), 404
 
     try:
-        from src.integrations.printify_client import generate_listing_copy
-
         image_path = row["path"]
         stem = Path(image_path).stem.replace("_final", "").replace("_", " ").strip()
 
@@ -1052,13 +999,15 @@ def api_confirm():
 
         printify = build_client_from_env()
         shop_id = _get_printify_shop_id(printify)
-        upload_id = printify.upload_image(image_path)
-        template_product = _get_template_product(printify, shop_id)
-        product_payload = _build_product_payload(copy, template_product, upload_id)
-
-        product = printify.create_product(shop_id=shop_id, payload=product_payload)
+        product = create_and_publish_product(
+            client=printify,
+            shop_id=shop_id,
+            image_path=image_path,
+            title=copy["title"],
+            description=copy["description"],
+            tags=copy["tags"],
+        )
         product_id = str(product["id"])
-        printify.publish_product(shop_id=shop_id, product_id=product_id)
 
         update_design_status(design_id, "published", printify_product_id=product_id)
         return jsonify({"message": f"Published. Product ID: {product_id}"})

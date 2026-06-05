@@ -11,7 +11,8 @@ numpy<2.0.0
 openpyxl==3.1.2                  # Required for Excel operations
 lxml==4.9.3
 beautifulsoup4==4.12.3
-Pillow                      
+Pillow
+rembg[cpu]==2.0.76
 
 # --- Networking & Web Scraping ---
 requests==2.31.0
