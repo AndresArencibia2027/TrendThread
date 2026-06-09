@@ -18,6 +18,8 @@ from src.processors.gemini_analyzer import (
 )
 from src.utils.asset_engine import process_final_assets
 
+from src.trends import config as trend_config
+
 load_dotenv()
 
 # Centralized reference for the KYM data
@@ -35,10 +37,57 @@ def get_local_kym_context():
                 kym_entries.append({"title": clean_title, "path": str(file)})
     return kym_entries
 
-def main():
+def run_gemini_trend_pipeline():
+    """New default pipeline: Gemini/Vertex AI trend engine (no scraping)."""
+    from src.trends import service
+
     print("\n" + "="*60)
-    print(" --- STARTING SUBJECT-CENTRIC TREND PIPELINE ---")
+    print(" --- STARTING GEMINI TREND ENGINE (manual scan) ---")
     print("="*60)
+    result = service.run_and_store(scan_type="manual")
+
+    print(f"\n Run #{result['run_id']} | model: {result['model']} | "
+          f"saved {result['saved_events']} events")
+
+    opps = result.get("merch_opportunities", [])
+    if opps:
+        print(f"\n{' MERCH OPPORTUNITY':<40} | {'RISK':<10} | {'ACTION'}")
+        print("-" * 75)
+        for o in opps:
+            name = (o.get("trend_event_name") or "")[:38]
+            print(f"{name:<40} | {str(o.get('legal_risk', '')):<10} | {o.get('recommended_action', '')}")
+
+    plan = result.get("immediate_action_plan", [])
+    if plan:
+        print("\n IMMEDIATE ACTION PLAN:")
+        for i, step in enumerate(plan, 1):
+            print(f"  {i}. {step}")
+
+    print("\n Trend scan complete. Open the dashboard (python app.py) to review,")
+    print(" then use upload_tshirt.py / the image generator to produce assets.")
+
+
+def main():
+    # Route to the new Gemini engine unless the operator has explicitly opted
+    # back into the legacy scraping pipeline via feature flags.
+    if trend_config.is_gemini_engine() and not trend_config.legacy_scraping_enabled():
+        run_gemini_trend_pipeline()
+        return
+
+    print("\n" + "="*60)
+    print(" --- STARTING LEGACY SUBJECT-CENTRIC SCRAPING PIPELINE ---")
+    print(" (TREND_ENGINE_PROVIDER!=gemini or ENABLE_LEGACY_SCRAPING=true)")
+    print("="*60)
+    return _run_legacy_scraping_pipeline()
+
+
+def _run_legacy_scraping_pipeline():
+    """DEPRECATED multi-source scraping pipeline.
+
+    Kept for reference / fallback. Disabled by default behind the feature flags
+    TREND_ENGINE_PROVIDER=gemini and ENABLE_LEGACY_SCRAPING=false. It depends on
+    X/Twitter scraping, GDELT, BigQuery and KnowYourMeme.
+    """
     client = get_client()
     
     try:

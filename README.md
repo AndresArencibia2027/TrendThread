@@ -1,8 +1,82 @@
 # TrendThread Store Manager 
 
-TrendThread Store Manager is a private seller tool designed to autonomously identify, curate, and manufacture high-marketability assets for a trend-focused Etsy shop. By synthesizing search intent from BigQuery with cultural context from KnowYourMeme, the application generates professional-grade visual motifs ready for print-on-demand products.
+TrendThread Store Manager is a private seller tool designed to autonomously identify, curate, and manufacture high-marketability assets for a trend-focused Etsy shop. The default trend engine is now **Gemini / Vertex AI**, which produces ranked, IP-safe merch opportunities and a production calendar — replacing the older multi-source scraping pipeline.
 
 This project is intended for internal use only and is not distributed as a public service.
+
+---
+
+## Gemini Trend Engine (default)
+
+The trend engine is server-side only and feature-flagged:
+
+```
+TREND_ENGINE_PROVIDER=gemini      # selects the Gemini engine (default)
+ENABLE_LEGACY_SCRAPING=false      # keeps the old scrapers OFF
+```
+
+It reuses the existing Vertex AI auth (same credentials as image generation) and
+returns structured JSON: top merch opportunities, upcoming predictable events,
+viral trends to monitor, evergreen ideas, high-risk trends to avoid, and an
+immediate action plan. Each opportunity includes a safe (IP-clean) design angle,
+unsafe terms to avoid, design concepts, Etsy SEO keywords, legal-risk and
+saturation ratings, a trend score, and a recommended action. High / Very High
+legal-risk items are flagged for manual review and never auto-approved.
+
+### Setup
+
+1. Install dependencies: `pip install -r requirements.txt`
+2. Copy env: `cp .env.example .env` and fill in the Google Cloud values
+   (`GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, `GOOGLE_APPLICATION_CREDENTIALS`,
+   `GEMINI_TREND_MODEL`, `CRON_SECRET`). The legacy `VERTEX_PROJECT_ID` /
+   `VERTEX_LOCATION` names are still honored as a fallback.
+3. Initialize the database (auto-runs, or do it manually):
+   `python -m src.trends.database`
+
+### Dashboard + manual scan
+
+```bash
+python app.py            # http://localhost:5000
+```
+
+Click **Run Trend Scan** (manual / daily / weekly) to call the backend and view
+ranked opportunities and the saved production calendar. You can also run a scan
+from the CLI:
+
+```bash
+python main.py                       # manual scan (Gemini engine)
+python scripts/run_scan.py manual --context "summer pet vibes"
+```
+
+### API routes
+
+| Route | Method | Auth | Purpose |
+| --- | --- | --- | --- |
+| `/api/trends/scan` | POST | none | manual scan (dashboard button) |
+| `/api/trends/daily` | POST | `CRON_SECRET` | current / viral trends |
+| `/api/trends/weekly` | POST | `CRON_SECRET` | event calendar + planning |
+| `/api/trends/events` | GET | none | load saved events |
+
+Cron routes require `Authorization: Bearer <CRON_SECRET>` (or `X-Cron-Secret`).
+
+### Scheduling (system cron)
+
+This is a Python/Flask app (not Vercel), so daily/weekly scans run via system
+cron using `scripts/run_scan.py` (calls the service directly, no HTTP):
+
+```cron
+0 8 * * *  cd /path/to/TrendThread && /path/to/venv/bin/python scripts/run_scan.py daily  >> data/cron.log 2>&1
+0 7 * * 1  cd /path/to/TrendThread && /path/to/venv/bin/python scripts/run_scan.py weekly >> data/cron.log 2>&1
+```
+
+Or trigger the HTTP routes with curl: `curl -X POST -H "Authorization: Bearer $CRON_SECRET" http://host/api/trends/daily`.
+
+### Legacy scraping pipeline
+
+The old X/Twitter, GDELT, BigQuery, and KnowYourMeme scrapers in `src/fetchers/`
+are **not deleted** — they are disabled behind the feature flags above. To run
+the legacy pipeline, set `ENABLE_LEGACY_SCRAPING=true` (and/or
+`TREND_ENGINE_PROVIDER` to something other than `gemini`) and run `python main.py`.
 
 ---
 

@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>TrendThread · Trend Calendar</title>
+  <style>
+    :root {
+      --bg: #0f1115; --panel: #181b22; --panel-2: #1f232c; --border: #2a2f3a;
+      --text: #e7eaf0; --muted: #9aa3b2; --accent: #6c8cff; --accent-2: #8a6cff;
+      --green: #36c98a; --yellow: #e7c14b; --orange: #e58a3c; --red: #e5553c;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: var(--bg); color: var(--text); line-height: 1.5; }
+    header { display: flex; align-items: center; justify-content: space-between; padding: 18px 28px; border-bottom: 1px solid var(--border); background: linear-gradient(180deg, #14171d, #0f1115); position: sticky; top: 0; z-index: 5; }
+    header h1 { font-size: 18px; margin: 0; letter-spacing: 0.3px; }
+    header .meta { color: var(--muted); font-size: 12px; }
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; border: 1px solid var(--border); background: var(--panel-2); }
+    main { max-width: 1240px; margin: 0 auto; padding: 24px 28px 90px; }
+    .controls { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 16px; margin-bottom: 22px; }
+    select, input[type=text] { background: var(--panel-2); color: var(--text); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; font-size: 14px; min-width: 160px; }
+    input[type=text] { min-width: 260px; flex: 1; }
+    button { background: linear-gradient(180deg, var(--accent), var(--accent-2)); color: white; border: none; border-radius: 10px; padding: 10px 16px; font-size: 13px; font-weight: 600; cursor: pointer; transition: opacity .15s; }
+    button.secondary { background: var(--panel-2); border: 1px solid var(--border); color: var(--text); }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .status { color: var(--muted); font-size: 13px; min-height: 18px; }
+    h2 { font-size: 14px; margin: 26px 0 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.6px; }
+
+    /* Calendar */
+    .month { margin-bottom: 18px; }
+    .month-title { font-size: 15px; font-weight: 700; margin: 16px 0 8px; color: var(--text); border-bottom: 1px solid var(--border); padding-bottom: 6px; }
+    .events { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 14px; }
+    .event { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 14px; display: flex; flex-direction: column; gap: 9px; }
+    .event .date { font-size: 12px; color: var(--accent); font-weight: 700; letter-spacing: 0.4px; }
+    .event h3 { margin: 0; font-size: 15px; }
+    .row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+    .pill { font-size: 11px; padding: 3px 9px; border-radius: 999px; border: 1px solid var(--border); background: var(--panel-2); color: var(--muted); }
+    .pill.score { color: var(--text); }
+    .risk-low { color: var(--green); border-color: var(--green); }
+    .risk-medium { color: var(--yellow); border-color: var(--yellow); }
+    .risk-high { color: var(--orange); border-color: var(--orange); }
+    .risk-very-high { color: var(--red); border-color: var(--red); }
+    .review { color: var(--red); font-weight: 600; font-size: 12px; }
+    .field { font-size: 13px; }
+    .field .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
+    .actions { display: flex; gap: 8px; margin-top: 4px; }
+    .listing-preview { border-top: 1px dashed var(--border); padding-top: 10px; margin-top: 4px; display: none; }
+    .listing-preview img { width: 100%; border-radius: 10px; background: #fff; border: 1px solid var(--border); }
+    .listing-preview .ttl { font-weight: 700; font-size: 14px; margin: 8px 0 4px; }
+    .listing-preview .desc { font-size: 12px; color: var(--muted); white-space: pre-wrap; }
+    .tags { font-size: 12px; color: var(--muted); }
+    .empty { color: var(--muted); padding: 22px; text-align: center; border: 1px dashed var(--border); border-radius: 14px; }
+    .mini { font-size: 11px; color: var(--muted); }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+    th { color: var(--muted); font-weight: 500; font-size: 11px; text-transform: uppercase; }
+    a { color: var(--accent); }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>TrendThread · Trend Calendar</h1>
+    <div class="meta">
+      provider <span class="badge">{{ provider }}</span>
+      model <span class="badge">{{ model }}</span>
+      Printify <span class="badge">{{ 'connected' if printify_ready else 'not configured' }}</span>
+    </div>
+  </header>
+
+  <main>
+    <div class="controls">
+      <select id="scanType">
+        <option value="weekly">Weekly (event calendar)</option>
+        <option value="daily">Daily (current / viral)</option>
+        <option value="manual">Manual (balanced)</option>
+      </select>
+      <input type="text" id="context" placeholder="Optional focus (e.g. summer, pets, soccer)…" />
+      <button id="runBtn" onclick="runScan()">Run Trend Scan</button>
+      <span class="status" id="status"></span>
+    </div>
+
+    <h2>Event calendar</h2>
+    <p class="mini">Listings are generated from the IP-safe design angle (never trademarked names). High / Very High legal-risk events must be approved before they can be published.</p>
+    <div id="calendar">
+      {% if events %}
+        {% set ns = namespace(current="") %}
+        {% for e in events %}
+          {% set month = (e.event_date[:7] if e.event_date else "No date / viral & evergreen") %}
+          {% if month != ns.current %}
+            {% if not loop.first %}</div>{% endif %}
+            {% set ns.current = month %}
+            <div class="month-title">{{ month }}</div>
+            <div class="events">
+          {% endif %}
+          <div class="event" id="event-{{ e.id }}" data-event-id="{{ e.id }}">
+            {% if e.event_date %}<div class="date">{{ e.event_date }}</div>{% endif %}
+            <h3>{{ e.name }}</h3>
+            <div class="row">
+              {% if e.category %}<span class="pill">{{ e.category }}</span>{% endif %}
+              {% if e.trend_type %}<span class="pill">{{ e.trend_type }}</span>{% endif %}
+              {% if e.trend_score is not none %}<span class="pill score">score {{ e.trend_score }}</span>{% endif %}
+              {% if e.legal_risk %}<span class="pill risk-{{ e.legal_risk|lower|replace(' ', '-') }}">{{ e.legal_risk }} risk</span>{% endif %}
+            </div>
+            {% if e.requires_manual_review %}<div class="review">⚠ Manual review required — publishing locked</div>{% endif %}
+            {% if e.safe_design_angle %}<div class="field"><span class="label">Safe design angle</span><br>{{ e.safe_design_angle }}</div>{% endif %}
+            {% if e.last_useful_upload_date %}<div class="mini">Publish by {{ e.listing_publish_date }} · last useful upload {{ e.last_useful_upload_date }}</div>{% endif %}
+            <div class="actions">
+              <button onclick="generateListing({{ e.id }})">Generate listing</button>
+            </div>
+            <div class="listing-preview" id="preview-{{ e.id }}"></div>
+          </div>
+        {% endfor %}
+        </div>
+      {% else %}
+        <div class="empty">No events yet. Run a weekly trend scan to build the calendar.</div>
+      {% endif %}
+    </div>
+
+    <div id="results"></div>
+
+    <h2>Generated listings</h2>
+    {% if listings %}
+    <table>
+      <thead><tr><th>ID</th><th>Event</th><th>Title</th><th>Status</th><th>Printify</th></tr></thead>
+      <tbody>
+        {% for l in listings %}
+        <tr>
+          <td>{{ l.id }}</td>
+          <td>{{ l.event_name }}</td>
+          <td>{{ l.title }}</td>
+          <td>{{ l.status }}</td>
+          <td>{% if l.external_url %}<a href="{{ l.external_url }}" target="_blank">view</a>{% else %}—{% endif %}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <div class="empty">No listings generated yet.</div>
+    {% endif %}
+  </main>
+
+  <script>
+    const riskClass = (r) => 'risk-' + (r || '').toLowerCase().replace(/ /g, '-');
+    function escapeHtml(s){ return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+    async function runScan() {
+      const btn = document.getElementById('runBtn');
+      const status = document.getElementById('status');
+      const scan_type = document.getElementById('scanType').value;
+      const context = document.getElementById('context').value.trim();
+      btn.disabled = true;
+      status.textContent = `Running ${scan_type} scan via Gemini…`;
+      try {
+        const res = await fetch('/api/trends/scan', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ scan_type, context: context || undefined }) });
+        const data = await res.json();
+        if (!data.ok) throw new Error(data.error || 'Scan failed');
+        status.textContent = `Saved ${data.saved_events} events (run #${data.run_id}). Reloading calendar…`;
+        setTimeout(() => location.reload(), 900);
+      } catch (e) { status.textContent = 'Error: ' + e.message; btn.disabled = false; }
+    }
+
+    async function generateListing(eventId) {
+      const preview = document.getElementById('preview-' + eventId);
+      preview.style.display = 'block';
+      preview.innerHTML = '<div class="mini">Generating IP-safe listing + image via Gemini/Imagen… (this can take ~30s)</div>';
+      try {
+        const res = await fetch('/api/listings/generate', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ event_id: eventId }) });
+        const data = await res.json();
+        if (!data.ok) throw new Error(data.error || 'Generation failed');
+        renderListing(eventId, data.listing);
+      } catch (e) { preview.innerHTML = '<div class="review">Error: ' + escapeHtml(e.message) + '</div>'; }
+    }
+
+    function renderListing(eventId, l) {
+      const preview = document.getElementById('preview-' + eventId);
+      const blocked = l.status === 'blocked';
+      const img = l.image_path ? `<img src="/api/listings/${l.id}/image?t=${Date.now()}" alt="design"/>` : '<div class="mini">No image generated.</div>';
+      const tags = (l.tags || []).join(', ');
+      const publishBtn = blocked
+        ? `<button class="secondary" onclick="publishListing(${l.id}, true, this)">Approve &amp; publish (override)</button>`
+        : `<button onclick="publishListing(${l.id}, false, this)">Publish to Printify</button>`;
+      preview.innerHTML = `
+        ${img}
+        <div class="ttl">${escapeHtml(l.title)}</div>
+        <div class="desc">${escapeHtml(l.description)}</div>
+        ${tags ? `<div class="tags" style="margin-top:6px"><span class="label">Tags:</span> ${escapeHtml(tags)}</div>` : ''}
+        ${blocked ? `<div class="review" style="margin-top:8px">⚠ ${escapeHtml(l.blocked_reason || 'Manual review required')}</div>` : ''}
+        <div class="actions" style="margin-top:8px">${publishBtn}</div>
+        <div class="status" id="pubstatus-${l.id}"></div>`;
+    }
+
+    async function publishListing(listingId, force, btn) {
+      const status = document.getElementById('pubstatus-' + listingId);
+      btn.disabled = true;
+      status.textContent = 'Publishing to Printify…';
+      try {
+        const res = await fetch(`/api/listings/${listingId}/publish`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ force: !!force }) });
+        const data = await res.json();
+        if (res.status === 409 && data.blocked) {
+          status.innerHTML = '<span class="review">' + escapeHtml(data.error) + '</span>';
+          btn.disabled = false; return;
+        }
+        if (!data.ok) throw new Error(data.error || 'Publish failed');
+        status.innerHTML = `Published as ${data.status} → <a href="${data.url}" target="_blank">Printify product</a>`;
+      } catch (e) { status.innerHTML = '<span class="review">Error: ' + escapeHtml(e.message) + '</span>'; btn.disabled = false; }
+    }
+  </script>
+</body>
+</html>
